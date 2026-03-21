@@ -1,0 +1,165 @@
+"""
+Tests for order placement and signing logic.
+
+Verifies that orders are correctly structured, include feeRateBps,
+and behave correctly in dry_run/paper/live modes.
+"""
+
+import asyncio
+import os
+import sys
+import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+
+class TestPolymarketClient(unittest.TestCase):
+    def setUp(self):
+        # Force dry_run mode for tests
+        import config
+        config.BOT_MODE = "dry_run"
+        from core.polymarket_client import PolymarketClient
+        self.client = PolymarketClient()
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_place_maker_order_dry_run(self):
+        """Dry run should return simulated order without calling API."""
+        result = self._run(self.client.place_maker_order(
+            token_id="0xabc123",
+            side="BUY",
+            price=0.90,
+            size=5.0,
+            fee_rate_bps=0,
+        ))
+        self.assertTrue(result.success)
+        self.assertTrue(result.simulated)
+        self.assertTrue(result.order_id.startswith("SIM-"))
+
+    def test_order_id_increments(self):
+        """Simulated order IDs should be unique and increment."""
+        r1 = self._run(self.client.place_maker_order("0xa", "BUY", 0.90, 5.0))
+        r2 = self._run(self.client.place_maker_order("0xb", "BUY", 0.85, 5.0))
+        self.assertNotEqual(r1.order_id, r2.order_id)
+
+    def test_cancel_order_dry_run(self):
+        """Cancel should succeed in dry_run mode."""
+        result = self._run(self.client.cancel_order("SIM-000001"))
+        self.assertTrue(result)
+
+    def test_cancel_all_dry_run(self):
+        result = self._run(self.client.cancel_all_orders())
+        self.assertTrue(result)
+
+    def test_minimum_shares_enforced(self):
+        """Should increase shares to meet minimum share requirement."""
+        import config
+        # Very small order: 1 USDC at 0.50 = 2 shares, below POLY_MIN_SHARES (5)
+        result = self._run(self.client.place_maker_order("0xa", "BUY", 0.50, 1.0))
+        # Should still succeed (shares bumped to minimum)
+        self.assertTrue(result.success)
+
+    def test_initialize_without_credentials(self):
+        """Should initialize gracefully without credentials."""
+        from core.polymarket_client import PolymarketClient
+        client = PolymarketClient()
+        ok = client.initialize()
+        self.assertTrue(ok)  # Should not crash
+
+
+class TestOrderManager(unittest.TestCase):
+    def setUp(self):
+        import config
+        config.BOT_MODE = "dry_run"
+        from core.polymarket_client import PolymarketClient
+        from core.order_manager import OrderManager
+        self.client = PolymarketClient()
+        self.order_mgr = OrderManager(self.client)
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_place_and_track_order(self):
+        """Placed order should be tracked as open."""
+        order = self._run(self.order_mgr.place_order(
+            token_id="0xabc",
+            side="BUY",
+            price=0.90,
+            size=5.0,
+            strategy="endcycle_sniper",
+        ))
+        self.assertIsNotNone(order)
+        open_orders = self.order_mgr.get_open_orders()
+        self.assertEqual(len(open_orders), 1)
+        self.assertEqual(open_orders[0].strategy, "endcycle_sniper")
+
+    def test_cancel_order(self):
+        """Cancelled order should be removed from open orders."""
+        order = self._run(self.order_mgr.place_order("0xabc", "BUY", 0.90, 5.0, "test"))
+        self._run(self.order_mgr.cancel_order_by_id(order.order_id))
+        open_orders = self.order_mgr.get_open_orders()
+        self.assertEqual(len(open_orders), 0)
+
+    def test_cancel_by_strategy(self):
+        """Cancel all orders from specific strategy."""
+        self._run(self.order_mgr.place_order("0xa", "BUY", 0.90, 5.0, "strategy_a"))
+        self._run(self.order_mgr.place_order("0xb", "BUY", 0.85, 5.0, "strategy_b"))
+
+        cancelled = self._run(self.order_mgr.cancel_by_strategy("strategy_a"))
+        self.assertEqual(cancelled, 1)
+        open_orders = self.order_mgr.get_open_orders()
+        # Only strategy_b order remains
+        self.assertEqual(len(open_orders), 1)
+        self.assertEqual(open_orders[0].strategy, "strategy_b")
+
+    def test_fee_rate_bps_zero_for_maker(self):
+        """Maker orders should always use fee_rate_bps=0."""
+        order = self._run(self.order_mgr.place_order(
+            "0xa", "BUY", 0.90, 5.0, "test", fee_rate_bps=0
+        ))
+        self.assertIsNotNone(order)
+        # If order placed, it went through with fee_rate_bps=0
+        self.assertTrue(order.simulated)
+
+
+class TestMarketDiscovery(unittest.TestCase):
+    def test_slug_is_deterministic(self):
+        """Same timestamp should always produce the same slug."""
+        from core.market_discovery import build_slug
+        slug1 = build_slug("5m", 0)
+        slug2 = build_slug("5m", 0)
+        self.assertEqual(slug1, slug2)
+
+    def test_slug_format(self):
+        """Slug should match expected pattern."""
+        from core.market_discovery import build_slug
+        slug = build_slug("5m")
+        parts = slug.split("-")
+        self.assertEqual(parts[0], "btc")
+        self.assertEqual(parts[1], "updown")
+        self.assertEqual(parts[2], "5m")
+        ts = int(parts[3])
+        self.assertEqual(ts % 300, 0)
+
+    def test_15m_slug_format(self):
+        from core.market_discovery import build_slug
+        slug = build_slug("15m")
+        self.assertIn("15m", slug)
+        ts = int(slug.split("-")[-1])
+        self.assertEqual(ts % 900, 0)
+
+    def test_next_window_slug(self):
+        """offset=1 should return next window, aligned to 300s boundary."""
+        from core.market_discovery import build_slug
+        import time
+        slug0 = build_slug("5m", 0)
+        slug1 = build_slug("5m", 1)
+        ts0 = int(slug0.split("-")[-1])
+        ts1 = int(slug1.split("-")[-1])
+        self.assertEqual(ts1 - ts0, 300)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

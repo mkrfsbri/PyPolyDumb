@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PyPolyDumb — BTC Trading Bot</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Courier New', monospace; background: #0d1117; color: #c9d1d9; }
+  header { padding: 16px 24px; background: #161b22; border-bottom: 1px solid #30363d;
+           display: flex; align-items: center; justify-content: space-between; }
+  header h1 { font-size: 1.2rem; color: #58a6ff; }
+  .badge { padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: bold; }
+  .badge-dry  { background: #6e40c9; color: #fff; }
+  .badge-paper{ background: #1a6ae0; color: #fff; }
+  .badge-live { background: #1a7f37; color: #fff; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr)); gap: 16px;
+          padding: 20px 24px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+  .card h3 { font-size: 0.75rem; text-transform: uppercase; color: #8b949e; margin-bottom: 8px; }
+  .card .value { font-size: 1.6rem; font-weight: bold; }
+  .green { color: #3fb950; }
+  .red   { color: #f85149; }
+  .yellow{ color: #d29922; }
+  .dim   { color: #8b949e; font-size: 0.85rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th { text-align: left; padding: 8px 12px; color: #8b949e; border-bottom: 1px solid #30363d;
+       font-size: 0.72rem; text-transform: uppercase; }
+  td { padding: 8px 12px; border-bottom: 1px solid #21262d; }
+  tr:hover { background: #1c2128; }
+  .outcome-WIN  { color: #3fb950; font-weight: bold; }
+  .outcome-LOSS { color: #f85149; font-weight: bold; }
+  .outcome-PENDING { color: #d29922; }
+  .section { padding: 0 24px 24px; }
+  .section h2 { font-size: 0.85rem; text-transform: uppercase; color: #8b949e;
+                margin-bottom: 12px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
+  #countdown { font-size: 2rem; font-weight: bold; color: #58a6ff; }
+  .strategy-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+  .strategy-pill { padding: 4px 10px; border-radius: 12px; font-size: 0.72rem;
+                   background: #1f6feb33; border: 1px solid #1f6feb; color: #58a6ff; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .dot-green { background: #3fb950; }
+  .dot-red   { background: #f85149; }
+  #circuit-status { font-size: 0.85rem; padding: 8px 12px; border-radius: 6px; }
+  .circuit-ok     { background: #1a7f3722; border: 1px solid #1a7f37; }
+  .circuit-tripped{ background: #f851491a; border: 1px solid #f85149; }
+  canvas { width: 100%; max-height: 160px; }
+  #pnl-chart-container { background: #0d1117; border-radius: 4px; padding: 8px 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🤖 PyPolyDumb — BTC Up/Down Bot</h1>
+  <div style="display:flex;gap:12px;align-items:center">
+    <span id="mode-badge" class="badge badge-dry">DRY RUN</span>
+    <span class="dim" id="ws-status">⚡ connecting...</span>
+  </div>
+</header>
+
+<!-- KPI cards -->
+<div class="grid">
+  <div class="card">
+    <h3>Bankroll</h3>
+    <div class="value green" id="bankroll">$—</div>
+    <div class="dim" id="return-pct">+0.00%</div>
+  </div>
+  <div class="card">
+    <h3>Daily P&amp;L</h3>
+    <div class="value" id="daily-pnl">$—</div>
+    <div class="dim" id="win-rate">Win rate: —%</div>
+  </div>
+  <div class="card">
+    <h3>BTC Price</h3>
+    <div class="value" id="btc-price">$—</div>
+    <div class="dim" id="window-delta">Δ 0.00%</div>
+  </div>
+  <div class="card">
+    <h3>Window Countdown</h3>
+    <div id="countdown">—</div>
+    <div class="dim" id="window-slug">—</div>
+  </div>
+</div>
+
+<!-- Status -->
+<div class="section">
+  <h2>Bot Status</h2>
+  <div id="circuit-status" class="circuit-ok">
+    <span class="status-dot dot-green"></span> Circuit breaker: OK
+  </div>
+  <div class="strategy-row" id="active-strategies"></div>
+</div>
+
+<!-- Trade history -->
+<div class="section">
+  <h2>Recent Trades</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th><th>Strategy</th><th>Direction</th>
+        <th>Entry</th><th>Size</th><th>P&amp;L</th><th>Outcome</th>
+      </tr>
+    </thead>
+    <tbody id="trades-body">
+      <tr><td colspan="7" style="text-align:center;color:#8b949e">Loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Per-strategy stats -->
+<div class="section">
+  <h2>Strategy Performance</h2>
+  <table>
+    <thead>
+      <tr><th>Strategy</th><th>Trades</th><th>Win Rate</th><th>Total P&amp;L</th><th>Avg P&amp;L</th></tr>
+    </thead>
+    <tbody id="strategy-body">
+      <tr><td colspan="5" style="text-align:center;color:#8b949e">Loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+const ws = new WebSocket(`ws://${location.host}/ws/live`);
+const $ = id => document.getElementById(id);
+
+ws.onopen = () => $('ws-status').textContent = '⚡ live';
+ws.onclose = () => { $('ws-status').textContent = '❌ disconnected'; setTimeout(reconnect, 3000); };
+ws.onerror = () => $('ws-status').textContent = '❌ error';
+
+ws.onmessage = evt => {
+  const msg = JSON.parse(evt.data);
+  if (msg.type === 'price_update') handlePrice(msg.data);
+  else if (msg.type === 'bankroll_update') handleBankroll(msg.data);
+  else if (msg.type === 'new_trade') fetchTrades();
+};
+
+function handlePrice(d) {
+  $('btc-price').textContent = '$' + d.btc_price.toFixed(2);
+  const delta = (d.window_delta * 100).toFixed(3);
+  const el = $('window-delta');
+  el.textContent = `Δ ${delta > 0 ? '+' : ''}${delta}%`;
+  el.className = `dim ${d.window_delta >= 0 ? 'green' : 'red'}`;
+  updateCountdown(d.seconds_remaining);
+}
+
+function handleBankroll(d) {
+  $('bankroll').textContent = '$' + d.bankroll.toFixed(2);
+  const pnl = d.daily_pnl || 0;
+  const el = $('daily-pnl');
+  el.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)}`;
+  el.className = `value ${pnl >= 0 ? 'green' : 'red'}`;
+}
+
+function updateCountdown(secs) {
+  const s = Math.max(0, Math.floor(secs));
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  $('countdown').textContent = `${mm}:${ss}`;
+}
+
+async function fetchStatus() {
+  const r = await fetch('/api/status');
+  const d = await r.json();
+  const mode = d.mode || 'dry_run';
+  const badge = $('mode-badge');
+  badge.textContent = mode.toUpperCase().replace('_', ' ');
+  badge.className = `badge badge-${mode.replace('_', '')}`;
+
+  const strats = $('active-strategies');
+  strats.innerHTML = (d.active_strategies || [])
+    .map(s => `<span class="strategy-pill">${s}</span>`).join('');
+
+  $('window-slug').textContent = d.window_slug || '—';
+
+  const cb = d.circuit_breaker || {};
+  const cbEl = $('circuit-status');
+  if (cb.circuit_open) {
+    cbEl.className = 'circuit-tripped';
+    cbEl.innerHTML = `<span class="status-dot dot-red"></span> Circuit breaker OPEN — ${Math.floor(cb.cooldown_remaining || 0)}s remaining`;
+  } else {
+    cbEl.className = 'circuit-ok';
+    cbEl.innerHTML = `<span class="status-dot dot-green"></span> Circuit breaker: OK (consecutive losses: ${cb.consecutive_losses || 0})`;
+  }
+}
+
+async function fetchTrades() {
+  const r = await fetch('/api/trades');
+  const trades = await r.json();
+  const tbody = $('trades-body');
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#8b949e">No trades yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(t => {
+    const ts = t.timestamp ? t.timestamp.slice(11, 19) : '—';
+    const pnl = t.pnl != null ? `${t.pnl >= 0 ? '+' : ''}$${Number(t.pnl).toFixed(4)}` : '—';
+    const pnlClass = t.pnl >= 0 ? 'green' : 'red';
+    return `<tr>
+      <td>${ts}</td>
+      <td>${t.strategy}</td>
+      <td>${t.direction}</td>
+      <td>$${Number(t.entry_price).toFixed(3)}</td>
+      <td>$${Number(t.size_usdc).toFixed(2)}</td>
+      <td class="${pnlClass}">${pnl}</td>
+      <td class="outcome-${t.outcome}">${t.outcome}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function fetchPerformance() {
+  const r = await fetch('/api/performance');
+  const d = await r.json();
+  const strats = d.by_strategy || {};
+  const overall = d.overall || {};
+  $('win-rate').textContent = `Win rate: ${((overall.win_rate || 0) * 100).toFixed(1)}%`;
+
+  const tbody = $('strategy-body');
+  const rows = Object.values(strats);
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#8b949e">No data yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(s => {
+    const wr = ((s.win_rate || 0) * 100).toFixed(1);
+    const pnl = s.total_pnl || 0;
+    return `<tr>
+      <td>${s.label}</td>
+      <td>${s.total}</td>
+      <td>${wr}%</td>
+      <td class="${pnl >= 0 ? 'green' : 'red'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)}</td>
+      <td class="${s.avg_pnl >= 0 ? 'green' : 'red'}">${s.avg_pnl >= 0 ? '+' : ''}$${(s.avg_pnl || 0).toFixed(4)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function fetchBankroll() {
+  const r = await fetch('/api/bankroll');
+  const d = await r.json();
+  $('bankroll').textContent = '$' + (d.bankroll || 0).toFixed(2);
+  const ret = d.return_pct || 0;
+  $('return-pct').textContent = `${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%`;
+  $('return-pct').className = `dim ${ret >= 0 ? 'green' : 'red'}`;
+}
+
+// Initial load
+fetchStatus();
+fetchTrades();
+fetchPerformance();
+fetchBankroll();
+
+// Refresh intervals
+setInterval(fetchStatus, 10000);
+setInterval(fetchTrades, 5000);
+setInterval(fetchPerformance, 15000);
+setInterval(fetchBankroll, 5000);
+
+function reconnect() {
+  location.reload();
+}
+</script>
+</body>
+</html>
