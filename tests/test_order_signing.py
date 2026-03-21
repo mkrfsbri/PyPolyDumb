@@ -161,5 +161,129 @@ class TestMarketDiscovery(unittest.TestCase):
         self.assertEqual(ts1 - ts0, 300)
 
 
+class TestFetchMarketParsing(unittest.IsolatedAsyncioTestCase):
+    """Test _extract_all_tokens and fetch_market response parsing logic."""
+
+    def test_extract_tokens_flat(self):
+        """Shape A: tokens at top level."""
+        from core.market_discovery import _extract_all_tokens
+        market = {
+            "tokens": [
+                {"tokenId": "aaa", "outcome": "Up", "price": "0.55"},
+                {"tokenId": "bbb", "outcome": "Down", "price": "0.45"},
+            ]
+        }
+        tokens = _extract_all_tokens(market)
+        self.assertEqual(len(tokens), 2)
+        self.assertEqual(tokens[0]["tokenId"], "aaa")
+
+    def test_extract_tokens_missing(self):
+        """No tokens field → empty list."""
+        from core.market_discovery import _extract_all_tokens
+        tokens = _extract_all_tokens({"slug": "x", "markets": []})
+        self.assertEqual(tokens, [])
+
+    async def test_fetch_market_shape_a(self):
+        """Shape A (flat tokens) parsed correctly."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from core.market_discovery import fetch_market
+
+        fake_response = [{
+            "conditionId": "0x" + "a" * 64,
+            "slug": "btc-updown-5m-1000000200",
+            "endDateIso": "2001-09-08T21:50:00Z",
+            "tokens": [
+                {"tokenId": "UP_TOKEN", "outcome": "Up", "price": "0.55"},
+                {"tokenId": "DN_TOKEN", "outcome": "Down", "price": "0.45"},
+            ],
+        }]
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=fake_response)
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_cm)
+
+        result = await fetch_market("btc-updown-5m-1000000200", mock_session)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.up_token_id, "UP_TOKEN")
+        self.assertEqual(result.down_token_id, "DN_TOKEN")
+        self.assertAlmostEqual(result.up_price, 0.55)
+
+    async def test_fetch_market_shape_b(self):
+        """Shape B (nested markets, 1 token each) parsed correctly."""
+        from unittest.mock import AsyncMock, MagicMock
+        from core.market_discovery import fetch_market
+
+        fake_response = [{
+            "slug": "btc-updown-5m-1000000200",
+            "conditionId": "",
+            "endDateIso": "2001-09-08T21:50:00Z",
+            "tokens": [],   # empty at top level
+            "markets": [
+                {
+                    "conditionId": "0x" + "b" * 64,
+                    "tokens": [{"tokenId": "UP_TOK", "outcome": "Up", "price": "0.60"}],
+                },
+                {
+                    "conditionId": "0x" + "c" * 64,
+                    "tokens": [{"tokenId": "DN_TOK", "outcome": "Down", "price": "0.40"}],
+                },
+            ],
+        }]
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=fake_response)
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_cm)
+
+        result = await fetch_market("btc-updown-5m-1000000200", mock_session)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.up_token_id, "UP_TOK")
+        self.assertEqual(result.down_token_id, "DN_TOK")
+
+    async def test_fetch_market_snake_case_token_id(self):
+        """Handles snake_case token_id field (alternative API format)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from core.market_discovery import fetch_market
+
+        fake_response = [{
+            "conditionId": "0x" + "d" * 64,
+            "slug": "btc-updown-5m-1000000200",
+            "endDate": "2001-09-08T21:50:00Z",
+            "tokens": [
+                {"token_id": "UP_SNAKE", "outcome": "Yes", "price": "0.52"},
+                {"token_id": "DN_SNAKE", "outcome": "No", "price": "0.48"},
+            ],
+        }]
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=fake_response)
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_cm)
+
+        result = await fetch_market("btc-updown-5m-1000000200", mock_session)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.up_token_id, "UP_SNAKE")
+        self.assertEqual(result.down_token_id, "DN_SNAKE")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
