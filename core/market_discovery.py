@@ -57,10 +57,20 @@ def build_slug(window_type: str = "5m", offset_windows: int = 0) -> str:
 
 
 async def fetch_market(slug: str, session: aiohttp.ClientSession) -> Optional[MarketInfo]:
-    """Fetch market info from Gamma API by slug."""
+    """Fetch market info from Gamma API by slug.
+
+    Handles two Gamma API response shapes:
+
+    Shape A — flat (tokens at market level):
+        [{"conditionId": "...", "tokens": [{"tokenId"|"token_id": ..., "outcome": ...}, ...]}]
+
+    Shape B — nested/event (each sub-market has 1 token):
+        [{"slug": "...", "markets": [{"tokens": [{"tokenId": ..., "outcome": "Yes"}]}, ...]}]
+    """
     params = {"slug": slug}
     try:
-        async with session.get(GAMMA_MARKETS_URL, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+        async with session.get(GAMMA_MARKETS_URL, params=params,
+                               timeout=aiohttp.ClientTimeout(total=5)) as resp:
             if resp.status != 200:
                 log.warning("Gamma API returned %d for slug=%s", resp.status, slug)
                 return None
@@ -70,51 +80,77 @@ async def fetch_market(slug: str, session: aiohttp.ClientSession) -> Optional[Ma
                 log.debug("No market found for slug=%s", slug)
                 return None
 
-            market = data[0] if isinstance(data, list) else data
-            tokens = market.get("tokens", [])
-            if len(tokens) < 2:
-                log.warning("Market %s has <2 tokens", slug)
+            top = data[0] if isinstance(data, list) else data
+
+            # ── Collect all token objects from wherever they live ─────────────
+            all_tokens = _extract_all_tokens(top)
+            condition_id = top.get("conditionId") or top.get("condition_id") or ""
+            end_date = top.get("endDateIso") or top.get("endDate") or top.get("end_date_iso") or ""
+
+            # If top-level has no useful tokens, dig into sub-markets
+            if len(all_tokens) < 2:
+                sub_markets = top.get("markets", [])
+                for sm in sub_markets:
+                    all_tokens.extend(_extract_all_tokens(sm))
+                    if not condition_id:
+                        condition_id = sm.get("conditionId") or sm.get("condition_id") or ""
+                    if not end_date:
+                        end_date = sm.get("endDateIso") or sm.get("endDate") or ""
+
+            if len(all_tokens) < 2:
+                log.warning("Market %s: only %d token(s) found — skipping. "
+                            "Top-level keys: %s", slug, len(all_tokens), list(top.keys()))
                 return None
 
-            # Identify UP and DOWN token IDs
-            up_token_id = ""
-            down_token_id = ""
-            up_price = 0.50
-            down_price = 0.50
+            # ── Identify UP / DOWN ────────────────────────────────────────────
+            up_token_id, down_token_id = "", ""
+            up_price, down_price = 0.50, 0.50
 
-            for token in tokens:
-                outcome = (token.get("outcome") or "").upper()
-                tid = token.get("token_id", "")
-                price = float(token.get("price", 0.50))
-                if "UP" in outcome or outcome == "YES":
-                    up_token_id = tid
-                    up_price = price
-                elif "DOWN" in outcome or outcome == "NO":
-                    down_token_id = tid
-                    down_price = price
+            for tok in all_tokens:
+                outcome = (tok.get("outcome") or "").strip().upper()
+                tid = tok.get("tokenId") or tok.get("token_id") or ""
+                try:
+                    price = float(tok.get("price") or 0.50)
+                except (TypeError, ValueError):
+                    price = 0.50
+
+                if "UP" in outcome or outcome in ("YES", "HIGHER", "ABOVE"):
+                    up_token_id, up_price = tid, price
+                elif "DOWN" in outcome or outcome in ("NO", "LOWER", "BELOW"):
+                    down_token_id, down_price = tid, price
 
             if not up_token_id or not down_token_id:
-                # Fallback: first token = UP, second = DOWN
-                up_token_id = tokens[0].get("token_id", "")
-                down_token_id = tokens[1].get("token_id", "")
-                up_price = float(tokens[0].get("price", 0.50))
-                down_price = float(tokens[1].get("price", 0.50))
+                # Positional fallback: first token = UP, second = DOWN
+                tok0, tok1 = all_tokens[0], all_tokens[1]
+                if not up_token_id:
+                    up_token_id = tok0.get("tokenId") or tok0.get("token_id") or ""
+                    try:
+                        up_price = float(tok0.get("price") or 0.50)
+                    except (TypeError, ValueError):
+                        up_price = 0.50
+                if not down_token_id:
+                    up_token_id = up_token_id or (tok0.get("tokenId") or tok0.get("token_id") or "")
+                    down_token_id = tok1.get("tokenId") or tok1.get("token_id") or ""
+                    try:
+                        down_price = float(tok1.get("price") or 0.50)
+                    except (TypeError, ValueError):
+                        down_price = 0.50
+                log.debug("Used positional fallback for token IDs on %s", slug)
 
-            end_date = market.get("endDateIso") or market.get("end_date_iso") or ""
-            try:
-                import datetime
-                dt = datetime.datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-                close_ts = int(dt.timestamp())
-            except Exception:
-                interval = config.WINDOW_INTERVAL
-                now_ts = int(time.time())
-                close_ts = now_ts - (now_ts % interval) + interval
+            if not up_token_id or not down_token_id:
+                log.warning("Could not extract token IDs for %s", slug)
+                return None
 
+            # ── Parse close timestamp ─────────────────────────────────────────
+            close_ts = _parse_end_date(end_date)
             open_ts = close_ts - config.WINDOW_INTERVAL
+
+            log.debug("Parsed market %s | UP=%s DOWN=%s close_ts=%d",
+                      slug, up_token_id[:8], down_token_id[:8], close_ts)
 
             return MarketInfo(
                 slug=slug,
-                condition_id=market.get("conditionId", market.get("condition_id", "")),
+                condition_id=condition_id,
                 up_token_id=up_token_id,
                 down_token_id=down_token_id,
                 window_open_ts=open_ts,
@@ -129,6 +165,30 @@ async def fetch_market(slug: str, session: aiohttp.ClientSession) -> Optional[Ma
     except Exception as e:
         log.error("Error fetching market slug=%s: %s", slug, e)
         return None
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _extract_all_tokens(market: dict) -> list:
+    """Return all token objects from a market dict (handles both flat and nested)."""
+    tokens = market.get("tokens") or []
+    if isinstance(tokens, list):
+        return list(tokens)
+    return []
+
+
+def _parse_end_date(end_date: str) -> int:
+    """Parse ISO end date to unix timestamp; fallback to next window boundary."""
+    if end_date:
+        try:
+            import datetime
+            dt = datetime.datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            return int(dt.timestamp())
+        except Exception:
+            pass
+    interval = config.WINDOW_INTERVAL
+    now_ts = int(time.time())
+    return now_ts - (now_ts % interval) + interval
 
 
 async def get_current_market(window_type: str = "5m") -> Optional[MarketInfo]:
