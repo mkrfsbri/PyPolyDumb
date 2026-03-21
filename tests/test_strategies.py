@@ -74,7 +74,7 @@ class TestEndCycleSniper(unittest.TestCase):
         self.strategy = EndCycleSniper()
 
     def run_analyze(self, state):
-        return asyncio.get_event_loop().run_until_complete(self.strategy.analyze(state))
+        return asyncio.run(self.strategy.analyze(state))
 
     def test_no_signal_outside_window(self):
         """Should return NEUTRAL when not in end-cycle window."""
@@ -128,7 +128,7 @@ class TestPairCostAvg(unittest.TestCase):
         self.strategy = PairCostAvg()
 
     def run_analyze(self, state):
-        return asyncio.get_event_loop().run_until_complete(self.strategy.analyze(state))
+        return asyncio.run(self.strategy.analyze(state))
 
     def test_buy_cheap_up(self):
         """Should buy UP when UP token is cheap."""
@@ -206,7 +206,7 @@ class TestLatencyArb(unittest.TestCase):
         self.strategy = LatencyArb()
 
     def run_analyze(self, state):
-        return asyncio.get_event_loop().run_until_complete(self.strategy.analyze(state))
+        return asyncio.run(self.strategy.analyze(state))
 
     def test_arb_signal_when_edge(self):
         """Should signal when spot and market implied diverge significantly."""

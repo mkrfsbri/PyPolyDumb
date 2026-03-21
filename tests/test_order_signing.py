@@ -23,7 +23,7 @@ class TestPolymarketClient(unittest.TestCase):
         self.client = PolymarketClient()
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_place_maker_order_dry_run(self):
         """Dry run should return simulated order without calling API."""
@@ -79,7 +79,7 @@ class TestOrderManager(unittest.TestCase):
         self.order_mgr = OrderManager(self.client)
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_place_and_track_order(self):
         """Placed order should be tracked as open."""
