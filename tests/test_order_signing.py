@@ -123,6 +123,37 @@ class TestOrderManager(unittest.TestCase):
         # If order placed, it went through with fee_rate_bps=0
         self.assertTrue(order.simulated)
 
+    def test_simulate_fills_fires_callback(self):
+        """In dry_run, simulated orders should auto-fill and trigger callbacks."""
+        import time
+        order = self._run(self.order_mgr.place_order("0xa", "BUY", 0.90, 5.0, "test"))
+        self.assertIsNotNone(order)
+
+        filled_orders = []
+
+        async def fill_cb(o):
+            filled_orders.append(o)
+
+        self.order_mgr.on_fill(fill_cb)
+
+        # Force the order to appear old enough to fill (>= 2s threshold)
+        order.placed_at -= 3.0
+
+        self._run(self.order_mgr._simulate_fills())
+
+        self.assertTrue(order.filled)
+        self.assertEqual(len(filled_orders), 1)
+        self.assertEqual(filled_orders[0].order_id, order.order_id)
+        # Should no longer appear as open
+        self.assertEqual(len(self.order_mgr.get_open_orders()), 0)
+
+    def test_simulate_fills_respects_delay(self):
+        """Orders placed <2s ago should not be filled yet."""
+        order = self._run(self.order_mgr.place_order("0xa", "BUY", 0.90, 5.0, "test"))
+        # placed_at is now — age < 2s
+        self._run(self.order_mgr._simulate_fills())
+        self.assertFalse(order.filled)
+
 
 class TestMarketDiscovery(unittest.TestCase):
     def test_slug_is_deterministic(self):
