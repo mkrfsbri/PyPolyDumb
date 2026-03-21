@@ -9,6 +9,7 @@ Deterministic slug construction:
 """
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -183,9 +184,16 @@ def _extract_all_tokens(market: dict) -> list:
         return list(tokens)
 
     # Shape B: clobTokenIds paired with outcomes / outcomePrices
+    # Gamma API returns these as JSON-encoded strings, not parsed lists
     clob_ids = market.get("clobTokenIds") or []
     outcomes = market.get("outcomes") or []
     prices = market.get("outcomePrices") or []
+    if isinstance(clob_ids, str):
+        clob_ids = json.loads(clob_ids)
+    if isinstance(outcomes, str):
+        outcomes = json.loads(outcomes)
+    if isinstance(prices, str):
+        prices = json.loads(prices)
     if isinstance(clob_ids, list) and clob_ids:
         result = []
         for i, tid in enumerate(clob_ids):

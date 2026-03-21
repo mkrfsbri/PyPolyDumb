@@ -178,12 +178,12 @@ class TestFetchMarketParsing(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tokens[0]["tokenId"], "aaa")
 
     def test_extract_tokens_clob_token_ids(self):
-        """Shape B: clobTokenIds paired with outcomes/outcomePrices (real Gamma API format)."""
+        """Shape B: clobTokenIds as JSON strings (real Gamma API format)."""
         from core.market_discovery import _extract_all_tokens
         market = {
-            "clobTokenIds": ["UP_ID", "DN_ID"],
-            "outcomes": ["Up", "Down"],
-            "outcomePrices": ["0.58", "0.42"],
+            "clobTokenIds": '["UP_ID", "DN_ID"]',
+            "outcomes": '["Up", "Down"]',
+            "outcomePrices": '["0.58", "0.42"]',
         }
         tokens = _extract_all_tokens(market)
         self.assertEqual(len(tokens), 2)
@@ -309,9 +309,9 @@ class TestFetchMarketParsing(unittest.IsolatedAsyncioTestCase):
             "slug": "btc-updown-5m-1000000200",
             "endDateIso": "2001-09-08T21:50:00Z",
             "tokens": [],
-            "clobTokenIds": ["UP_CLOB", "DN_CLOB"],
-            "outcomes": ["Up", "Down"],
-            "outcomePrices": ["0.58", "0.42"],
+            "clobTokenIds": '["UP_CLOB", "DN_CLOB"]',
+            "outcomes": '["Up", "Down"]',
+            "outcomePrices": '["0.58", "0.42"]',
         }]
 
         mock_resp = AsyncMock()
