@@ -282,6 +282,7 @@ class BotOrchestrator:
             shares=shares,
             entry_price=signal.suggested_price,
             size_usdc=size,
+            window_close_ts=market.window_close_ts,
         )
         self.tracker.add_position(position)
 

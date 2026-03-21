@@ -28,6 +28,7 @@ class Position:
     shares: float
     entry_price: float
     size_usdc: float
+    window_close_ts: float = 0.0   # unix ts when the window ends
     opened_at: float = field(default_factory=time.time)
     closed: bool = False
     outcome: str = "PENDING"   # WIN | LOSS | PUSH | PENDING
@@ -118,6 +119,11 @@ class PositionTracker:
                 log.error("PositionTracker error: %s", e)
             await asyncio.sleep(10)
 
+    # Seconds after window_close_ts before we try price-based resolution.
+    _PRICE_RESOLVE_GRACE = 30
+    # Seconds after window_close_ts before we force-settle as PUSH.
+    _PUSH_EXPIRE_GRACE = 120
+
     async def _check_resolutions(self):
         """Check Gamma API for resolved markets with open positions."""
         pending_slugs = {p.window_slug for p in self._positions
@@ -134,6 +140,30 @@ class PositionTracker:
                         self._settle_window(slug, result)
                 except Exception as e:
                     log.warning("Resolution check failed for %s: %s", slug, e)
+
+        # Fallback: expire positions that are past their window close time.
+        self._expire_stale_positions()
+
+    def _expire_stale_positions(self):
+        """Settle positions for windows that closed long ago but never resolved."""
+        now = time.time()
+        for p in self._positions:
+            if p.closed or p.window_close_ts == 0:
+                continue
+            if p.window_slug in self._resolved_windows:
+                continue
+            age_past_close = now - p.window_close_ts
+            if age_past_close < self._PUSH_EXPIRE_GRACE:
+                continue
+            log.warning(
+                "Force-expiring position %s/%s — window closed %.0fs ago, API never resolved",
+                p.strategy, p.window_slug, age_past_close,
+            )
+            result = WindowResult(
+                slug=p.window_slug, direction="PUSH", resolved_at=now
+            )
+            self._resolved_windows[p.window_slug] = result
+            self._settle_window(p.window_slug, result)
 
     async def _fetch_resolution(
         self, slug: str, session: aiohttp.ClientSession
@@ -174,9 +204,13 @@ class PositionTracker:
 
     def _settle(self, position: Position, result: WindowResult):
         position.closed = True
-        won = position.direction == result.direction
 
-        if won:
+        if result.direction == "PUSH":
+            # Force-expiry fallback: treat as a break-even push.
+            position.outcome = "PUSH"
+            position.exit_price = position.entry_price
+            position.realized_pnl = 0.0
+        elif position.direction == result.direction:
             position.outcome = "WIN"
             position.exit_price = 1.0
             position.realized_pnl = position.win_pnl()

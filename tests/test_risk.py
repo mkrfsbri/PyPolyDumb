@@ -168,5 +168,58 @@ class TestRiskLimits(unittest.TestCase):
         self.assertLessEqual(max_size, 10.0)
 
 
+class TestPositionTrackerExpiry(unittest.TestCase):
+    """Stale positions must be force-settled so the position limit doesn't block trading."""
+
+    def _make_position(self, slug, close_ts, direction="UP"):
+        from core.position_tracker import Position
+        return Position(
+            window_slug=slug,
+            token_id="0xtoken",
+            direction=direction,
+            strategy="pair_cost_avg",
+            shares=5.0,
+            entry_price=0.20,
+            size_usdc=5.0,
+            window_close_ts=close_ts,
+        )
+
+    def test_push_expiry_after_grace(self):
+        """Position whose window closed > 120s ago should be force-settled as PUSH."""
+        from core.position_tracker import PositionTracker
+        tracker = PositionTracker()
+        pos = self._make_position("btc-updown-5m-111", time.time() - 200)
+        tracker.add_position(pos)
+
+        tracker._expire_stale_positions()
+
+        self.assertTrue(pos.closed)
+        self.assertEqual(pos.outcome, "PUSH")
+        self.assertEqual(pos.realized_pnl, 0.0)
+
+    def test_no_expiry_within_grace(self):
+        """Position whose window closed < 120s ago must NOT be force-settled yet."""
+        from core.position_tracker import PositionTracker
+        tracker = PositionTracker()
+        pos = self._make_position("btc-updown-5m-222", time.time() - 60)
+        tracker.add_position(pos)
+
+        tracker._expire_stale_positions()
+
+        self.assertFalse(pos.closed)
+
+    def test_push_settle_zeroes_pnl(self):
+        """PUSH outcome must have zero realized PnL."""
+        from core.position_tracker import PositionTracker, WindowResult
+        tracker = PositionTracker()
+        pos = self._make_position("btc-updown-5m-333", time.time() - 200)
+        tracker.add_position(pos)
+        result = WindowResult(slug=pos.window_slug, direction="PUSH", resolved_at=time.time())
+        tracker._settle(pos, result)
+        self.assertEqual(pos.outcome, "PUSH")
+        self.assertEqual(pos.realized_pnl, 0.0)
+        self.assertTrue(pos.closed)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
