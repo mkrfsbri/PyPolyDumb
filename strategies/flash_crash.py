@@ -136,10 +136,11 @@ class FlashCrash(BaseStrategy):
     def should_trade(self, signal: Signal, state: MarketState) -> bool:
         return signal.is_actionable()
 
-    def record_leg1(self, slug: str, direction: str, price: float, size_usdc: float):
-        shares = size_usdc / price
+    def record_leg1(self, slug: str, direction: str, price: float, size_usdc: float,
+                    token_id: str = ""):
+        shares = size_usdc / price if price > 0 else 0
         self._open_legs[slug] = CrashLeg(
-            token_id=state_token_id(state=None, direction=direction),
+            token_id=token_id,
             direction=direction,
             entry_price=price,
             size_usdc=size_usdc,

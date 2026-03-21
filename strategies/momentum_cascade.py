@@ -151,7 +151,7 @@ class MomentumCascade(BaseStrategy):
         breakdown["volume_surge"] = pts
 
         # 7. Orderflow imbalance (3 pts)
-        imbalance = state.orderflow_imbalance_up if is_up else -state.orderflow_imbalance_down
+        imbalance = state.orderflow_imbalance_up if is_up else state.orderflow_imbalance_down
         pts = 3.0 if imbalance > 0.2 else (1.5 if imbalance > 0 else 0.0)
         breakdown["orderflow_imbalance"] = pts
 

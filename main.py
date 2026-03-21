@@ -123,6 +123,14 @@ class BotOrchestrator:
         self._eval_interval = 1.0   # seconds between strategy evaluations
         self._running = False
         self._TradeRecord = TradeRecord
+        self._bg_tasks: set = set()  # keep strong references to background tasks
+
+    def _create_task(self, coro):
+        """Create a tracked background task (prevents GC before completion)."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     async def run(self):
         """Main bot loop."""
@@ -188,7 +196,7 @@ class BotOrchestrator:
         # Broadcast price update to dashboard
         try:
             from dashboard.server import broadcast_price
-            asyncio.create_task(broadcast_price(
+            self._create_task(broadcast_price(
                 state.btc_price, state.window_delta, state.seconds_remaining
             ))
         except Exception:
@@ -199,7 +207,10 @@ class BotOrchestrator:
                 continue
             try:
                 signal = await strategy.analyze(state)
-                if signal.is_actionable() and strategy.should_trade(signal, state):
+                if strategy.NAME == "market_maker":
+                    if strategy.should_trade(signal, state):
+                        await self._place_mm_quotes(strategy, signal, state)
+                elif signal.is_actionable() and strategy.should_trade(signal, state):
                     await self._place_trade(strategy, signal, state)
             except Exception as e:
                 log.error("Strategy %s error: %s", strategy.NAME, e)
@@ -288,7 +299,11 @@ class BotOrchestrator:
         self.tracker.add_position(position)
 
         # Notify strategy
-        if hasattr(strategy, "record_trade"):
+        if strategy.NAME == "flash_crash" and hasattr(strategy, "record_leg1"):
+            # Record leg1 so hedge check works; hedge is signalled on next analyze() call
+            strategy.record_leg1(market.slug, signal.direction,
+                                 signal.suggested_price, size, token_id)
+        elif hasattr(strategy, "record_trade"):
             strategy.record_trade(market.slug)
         elif strategy.NAME == "pair_cost_avg" and hasattr(strategy, "record_fill"):
             # Will be called when filled
@@ -297,7 +312,7 @@ class BotOrchestrator:
         # Dashboard broadcast
         try:
             from dashboard.server import broadcast_trade
-            asyncio.create_task(broadcast_trade({
+            self._create_task(broadcast_trade({
                 "strategy": strategy.NAME,
                 "direction": signal.direction,
                 "price": signal.suggested_price,
@@ -306,6 +321,39 @@ class BotOrchestrator:
             }))
         except Exception:
             pass
+
+    async def _place_mm_quotes(self, strategy, signal, state):
+        """Place two-sided market maker quotes for UP and DOWN tokens."""
+        from strategies.market_maker import MarketMaker
+        market = state.market
+        quotes = strategy.parse_quotes(signal)
+        if not quotes:
+            return
+
+        mm_size = min(3.0, self.bankroll.available / 4)
+        if mm_size < 1.0:
+            return
+
+        for direction, price in [
+            ("UP", quotes.up_bid),
+            ("DOWN", quotes.down_bid),
+        ]:
+            token_id = market.up_token_id if direction == "UP" else market.down_token_id
+            ok, reason = self.risk.check(mm_size, "market_maker", market.slug)
+            if not ok:
+                continue
+            order = await self.order_mgr.place_order(
+                token_id=token_id,
+                side="BUY",
+                price=price,
+                size=mm_size,
+                strategy="market_maker",
+                cancel_after_secs=config.MM_REFRESH_SECS * 1.5,
+                fee_rate_bps=0,
+            )
+            if order:
+                self.bankroll.allocate(mm_size)
+                log.info("MM quote placed: BUY %s @ %.3f size=$%.2f", direction, price, mm_size)
 
     async def _on_new_window(self, market):
         """Called when a new market window opens."""
@@ -324,19 +372,28 @@ class BotOrchestrator:
     async def _on_fill(self, order):
         """Called when an order is detected as filled."""
         log.info("Fill detected: %s | strategy=%s", order.order_id, order.strategy)
-        self.bankroll.deallocate(order.size)
+        # Capital stays allocated until settlement (position closes), not at fill time.
 
-        # Notify pair cost strategy of fill
+        # Notify strategies of fill
+        market = self.watcher.current
         for strategy in self.strategies:
             if strategy.NAME == "pair_cost_avg" and hasattr(strategy, "record_fill"):
-                market = self.watcher.current
                 if market:
-                    # Find direction from token_id
                     direction = "UP" if order.token_id == market.up_token_id else "DOWN"
                     strategy.record_fill(market.slug, direction, order.price, order.size)
+            elif strategy.NAME == "flash_crash" and hasattr(strategy, "record_hedge"):
+                if market and order.strategy == "flash_crash":
+                    direction = "UP" if order.token_id == market.up_token_id else "DOWN"
+                    # If this fill is the hedge leg (opposite of the open leg), record it
+                    if market.slug in strategy._open_legs:
+                        leg = strategy._open_legs[market.slug]
+                        if leg.direction != direction:
+                            strategy.record_hedge(market.slug, order.price)
 
     async def _on_pnl_update(self, position, pnl: float):
         """Called when a position is settled."""
+        # Release the capital that was locked for this position
+        self.bankroll.deallocate(position.size_usdc)
         self.bankroll.realize_pnl(pnl)
         # PUSH (pnl == 0, outcome == "PUSH") is a forced expiry, not a real loss.
         if pnl > 0:
@@ -361,7 +418,7 @@ class BotOrchestrator:
         try:
             from dashboard.server import broadcast_bankroll
             summary = self.tracker.summary()
-            asyncio.create_task(broadcast_bankroll(
+            self._create_task(broadcast_bankroll(
                 self.bankroll.bankroll, summary.get("daily_pnl", 0.0)
             ))
         except Exception:
@@ -432,6 +489,7 @@ class BotOrchestrator:
             down_ask=book_down.best_ask if book_down else market.down_price,
             orderflow_imbalance_up=self.orderbook_feed.orderflow_imbalance(market.up_token_id),
             orderflow_imbalance_down=self.orderbook_feed.orderflow_imbalance(market.down_token_id),
+            btc_open=self.binance_feed.window_open,
             seconds_remaining=market.seconds_remaining(),
         )
 

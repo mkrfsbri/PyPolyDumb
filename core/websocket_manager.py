@@ -50,7 +50,7 @@ class RealtimeBook:
     def mid_price(self) -> Optional[float]:
         b = self.best_bid()
         a = self.best_ask()
-        if b and a:
+        if b is not None and a is not None:
             return (b + a) / 2.0
         return None
 

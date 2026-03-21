@@ -105,6 +105,7 @@ def estimate_token_price(delta_pct: float) -> float:
 
 
 def sigmoid(x: float) -> float:
+    x = max(-500.0, min(500.0, x))  # clamp to prevent overflow
     return 1.0 / (1.0 + math.exp(-x))
 
 

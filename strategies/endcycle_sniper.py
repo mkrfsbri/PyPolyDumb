@@ -146,7 +146,7 @@ class EndCycleSniper(BaseStrategy):
             score += 1.0
 
         # 5. Orderflow imbalance (3 pts)
-        imbalance = state.orderflow_imbalance_up if is_up else -state.orderflow_imbalance_down
+        imbalance = state.orderflow_imbalance_up if is_up else state.orderflow_imbalance_down
         if imbalance > 0.2:
             score += 3.0
         elif imbalance > 0:

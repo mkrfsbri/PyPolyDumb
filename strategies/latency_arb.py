@@ -41,8 +41,8 @@ class LatencyArb(BaseStrategy):
         delta = state.window_delta
         momentum = state.momentum_30s
 
-        # Spot-implied probability
-        spot_implied_up = 0.50 + sigmoid(delta * 200) * 0.50
+        # Spot-implied probability: sigmoid(0)=0.5 naturally, no offset needed
+        spot_implied_up = sigmoid(delta * 200)
 
         # Current market implied from orderbook
         market_implied_up = state.up_price
