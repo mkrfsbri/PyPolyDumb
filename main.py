@@ -233,8 +233,11 @@ class BotOrchestrator:
             log.warning("Risk limit rejected %s trade: %s", strategy.NAME, reason)
             return
 
-        # For pair_cost_avg: fixed $5 per leg
+        # Fixed-size strategies bypass Kelly (Kelly requires win_prob > entry_price
+        # which the confidence scores for these strategies don't represent).
         if strategy.NAME == "pair_cost_avg":
+            size = min(5.0, self.bankroll.available)
+        elif strategy.NAME == "endcycle_sniper":
             size = min(5.0, self.bankroll.available)
 
         log.info("Placing %s %s order | strategy=%s price=%.3f size=$%.2f conf=%.2f",

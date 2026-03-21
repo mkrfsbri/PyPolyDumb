@@ -6,6 +6,7 @@ and settles positions to realized P&L.
 """
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -122,7 +123,9 @@ class PositionTracker:
     # Seconds after window_close_ts before we try price-based resolution.
     _PRICE_RESOLVE_GRACE = 30
     # Seconds after window_close_ts before we force-settle as PUSH.
-    _PUSH_EXPIRE_GRACE = 120
+    # 30s gives the Gamma API two full polling cycles to respond; beyond that
+    # we must unblock the position limit for the next window.
+    _PUSH_EXPIRE_GRACE = 30
 
     async def _check_resolutions(self):
         """Check Gamma API for resolved markets with open positions."""
@@ -179,20 +182,39 @@ class PositionTracker:
                     return None
                 market = data[0] if isinstance(data, list) else data
 
-                resolved = market.get("resolved") or market.get("is_resolved") or False
-                if not resolved:
-                    return None
+                tokens = market.get("tokens", [])
+                if isinstance(tokens, str):
+                    tokens = json.loads(tokens)
 
-                # Find winning outcome
-                for token in market.get("tokens", []):
-                    if float(token.get("winner_payout") or 0) == 1.0:
-                        outcome = (token.get("outcome") or "").upper()
-                        direction = "UP" if "UP" in outcome or outcome == "YES" else "DOWN"
-                        return WindowResult(
-                            slug=slug,
-                            direction=direction,
-                            resolved_at=time.time(),
-                        )
+                # Primary: API has set the resolved flag
+                resolved = market.get("resolved") or market.get("is_resolved") or False
+                if resolved:
+                    for token in tokens:
+                        if float(token.get("winner_payout") or 0) == 1.0:
+                            outcome = (token.get("outcome") or "").upper()
+                            direction = "UP" if "UP" in outcome or outcome == "YES" else "DOWN"
+                            return WindowResult(
+                                slug=slug,
+                                direction=direction,
+                                resolved_at=time.time(),
+                            )
+
+                # Fallback: market is closed and one token price has settled to 1.0.
+                # This fires before the resolved flag is set.
+                active = market.get("active", True)
+                closed = market.get("closed", False)
+                if not active or closed:
+                    for token in tokens:
+                        price = float(token.get("price") or 0)
+                        if price >= 0.99:
+                            outcome = (token.get("outcome") or "").upper()
+                            direction = "UP" if "UP" in outcome or outcome == "YES" else "DOWN"
+                            log.debug("Resolution via price fallback: %s → %s", slug, direction)
+                            return WindowResult(
+                                slug=slug,
+                                direction=direction,
+                                resolved_at=time.time(),
+                            )
         except Exception:
             pass
         return None

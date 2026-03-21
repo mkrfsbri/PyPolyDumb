@@ -198,10 +198,10 @@ class TestPositionTrackerExpiry(unittest.TestCase):
         self.assertEqual(pos.realized_pnl, 0.0)
 
     def test_no_expiry_within_grace(self):
-        """Position whose window closed < 120s ago must NOT be force-settled yet."""
+        """Position whose window closed < 30s ago must NOT be force-settled yet."""
         from core.position_tracker import PositionTracker
         tracker = PositionTracker()
-        pos = self._make_position("btc-updown-5m-222", time.time() - 60)
+        pos = self._make_position("btc-updown-5m-222", time.time() - 10)
         tracker.add_position(pos)
 
         tracker._expire_stale_positions()
