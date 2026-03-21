@@ -148,8 +148,9 @@ class PairCostAvg(BaseStrategy):
 
         cost = pair.pair_cost()
         profit = pair.potential_profit()
-        log.info("PairCostAvg fill: %s side at %.3f | pair_cost=%.4f potential_profit=%.4f",
-                 direction, price, cost, profit)
+        cost_str = "unmatched (one side only)" if cost >= 99.0 else f"{cost:.4f}"
+        log.info("PairCostAvg fill: %s side at %.3f | pair_cost=%s potential_profit=%.4f",
+                 direction, price, cost_str, profit)
 
         if pair.qty_up > 0 and pair.qty_down > 0 and cost < MAX_PAIR_COST:
             pair.completed = True
