@@ -226,9 +226,11 @@ async def get_current_market(window_type: str = "5m") -> Optional[MarketInfo]:
         for offset in (0, 1, -1):
             slug = build_slug(window_type, offset)
             market = await fetch_market(slug, session)
-            if market:
+            if market and market.is_active():
                 log.info("Found market: %s (%.0fs remaining)", slug, market.seconds_remaining())
                 return market
+            if market:
+                log.debug("Skipping expired market: %s", slug)
         log.error("Could not find any active BTC %s market", window_type)
         return None
 
