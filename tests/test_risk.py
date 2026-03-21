@@ -161,6 +161,30 @@ class TestRiskLimits(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("concurrent", reason.lower())
 
+    def test_position_limit_scoped_to_current_window(self):
+        """Positions from past windows must not block trading in the current window."""
+        import config
+        from risk.bankroll_manager import BankrollManager
+        from risk.risk_limits import RiskLimits
+        from unittest.mock import MagicMock
+
+        bm = BankrollManager(100.0)
+        tracker = MagicMock()
+        tracker.summary.return_value = {"daily_pnl": 0.0}
+
+        # open_positions(window_slug=...) returns 0 (current window is fresh)
+        # open_positions() (no slug) would return 3 (stale from old window)
+        def mock_open_positions(window_slug=None):
+            if window_slug == "btc-updown-5m-current":
+                return []
+            return [None] * config.MAX_CONCURRENT_POSITIONS
+
+        tracker.open_positions.side_effect = mock_open_positions
+        limits = RiskLimits(bm, tracker)
+
+        ok, reason = limits.check(5.0, "test", "btc-updown-5m-current")
+        self.assertTrue(ok, f"Should allow trade in fresh window, got: {reason}")
+
     def test_max_allowed_size(self):
         limits = self._make_limits()
         max_size = limits.max_allowed_size()

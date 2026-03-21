@@ -46,7 +46,7 @@ COOLDOWN_SECONDS: int = 900          # 15 min cooldown after circuit break
 
 # ── Strategy-specific constants ───────────────────────────────────────────────
 ENDCYCLE_HIGH_SCORE: float = 14.0   # out of 20
-ENDCYCLE_MED_SCORE: float = 10.0
+ENDCYCLE_MED_SCORE: float = 7.0     # lowered from 10 — real markets rarely exceed 10 on small delta
 ENDCYCLE_ACTIVATION_SECS: int = 30  # activate T-30s before window end
 ENDCYCLE_DEACTIVATE_SECS: int = 10  # stop at T-10s
 

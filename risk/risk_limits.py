@@ -24,9 +24,18 @@ class RiskLimits:
         self._bankroll = bankroll
         self._tracker = tracker
 
-    def check(self, proposed_size: float, strategy: str = "") -> tuple[bool, str]:
+    def check(
+        self,
+        proposed_size: float,
+        strategy: str = "",
+        current_window_slug: str = "",
+    ) -> tuple[bool, str]:
         """
         Run all risk checks before placing a trade.
+
+        current_window_slug: if provided, the concurrent-position limit is applied
+        only against positions in that window. Positions from expired windows that
+        haven't settled yet are ignored so they don't block fresh-window trading.
 
         Returns (allowed: bool, reason: str).
         """
@@ -41,8 +50,12 @@ class RiskLimits:
         if daily_pnl < -max_daily_loss:
             return False, f"Daily loss ${-daily_pnl:.2f} exceeds limit ${max_daily_loss:.2f}"
 
-        # 3. Max concurrent positions
-        open_count = len(self._tracker.open_positions())
+        # 3. Max concurrent positions — scoped to current window when slug is given
+        if current_window_slug:
+            open_positions = self._tracker.open_positions(window_slug=current_window_slug)
+        else:
+            open_positions = self._tracker.open_positions()
+        open_count = len(open_positions)
         if open_count >= config.MAX_CONCURRENT_POSITIONS:
             return False, f"Max concurrent positions ({config.MAX_CONCURRENT_POSITIONS}) reached"
 

@@ -123,9 +123,9 @@ class PositionTracker:
     # Seconds after window_close_ts before we try price-based resolution.
     _PRICE_RESOLVE_GRACE = 30
     # Seconds after window_close_ts before we force-settle as PUSH.
-    # 30s gives the Gamma API two full polling cycles to respond; beyond that
-    # we must unblock the position limit for the next window.
-    _PUSH_EXPIRE_GRACE = 30
+    # 120s gives the Gamma API ~12 polling cycles. The position limit is now
+    # scoped per-window so this no longer blocks fresh-window trading.
+    _PUSH_EXPIRE_GRACE = 120
 
     async def _check_resolutions(self):
         """Check Gamma API for resolved markets with open positions."""

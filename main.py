@@ -233,7 +233,7 @@ class BotOrchestrator:
             return
 
         # Risk limit check
-        ok, reason = self.risk.check(size, strategy.NAME)
+        ok, reason = self.risk.check(size, strategy.NAME, market.slug)
         if not ok:
             log.warning("Risk limit rejected %s trade: %s", strategy.NAME, reason)
             return
