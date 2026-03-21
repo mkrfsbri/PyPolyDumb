@@ -161,6 +161,43 @@ class TestMarketDiscovery(unittest.TestCase):
         self.assertEqual(ts1 - ts0, 300)
 
 
+class TestParseEndDate(unittest.TestCase):
+    """_parse_end_date should derive close_ts from slug when API gives date-only."""
+
+    def _call(self, end_date, slug=""):
+        from core.market_discovery import _parse_end_date
+        return _parse_end_date(end_date, slug)
+
+    def test_datetime_with_time_component(self):
+        """Full ISO datetime should be used as-is."""
+        ts = self._call("2026-03-21T14:35:00Z")
+        import datetime
+        dt = datetime.datetime.utcfromtimestamp(ts)
+        self.assertEqual(dt.hour, 14)
+        self.assertEqual(dt.minute, 35)
+
+    def test_date_only_falls_back_to_slug(self):
+        """Date-only endDate (midnight UTC) should be ignored; close_ts from slug."""
+        open_ts = 1774075500  # divisible by 300
+        slug = f"btc-updown-5m-{open_ts}"
+        ts = self._call("2026-03-21", slug)
+        self.assertEqual(ts, open_ts + 300)
+
+    def test_date_only_15m_slug(self):
+        open_ts = 1774074600  # divisible by 900
+        slug = f"btc-updown-15m-{open_ts}"
+        ts = self._call("2026-03-21", slug)
+        self.assertEqual(ts, open_ts + 900)
+
+    def test_no_end_date_no_slug_uses_boundary(self):
+        """Total fallback: next aligned window boundary."""
+        import time
+        ts = self._call("", "")
+        now = int(time.time())
+        self.assertGreater(ts, now)
+        self.assertEqual(ts % 300, 0)
+
+
 class TestFetchMarketParsing(unittest.IsolatedAsyncioTestCase):
     """Test _extract_all_tokens and fetch_market response parsing logic."""
 

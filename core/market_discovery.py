@@ -143,7 +143,7 @@ async def fetch_market(slug: str, session: aiohttp.ClientSession) -> Optional[Ma
                 return None
 
             # ── Parse close timestamp ─────────────────────────────────────────
-            close_ts = _parse_end_date(end_date)
+            close_ts = _parse_end_date(end_date, slug)
             open_ts = close_ts - config.WINDOW_INTERVAL
 
             log.debug("Parsed market %s | UP=%s DOWN=%s close_ts=%d",
@@ -205,15 +205,38 @@ def _extract_all_tokens(market: dict) -> list:
     return []
 
 
-def _parse_end_date(end_date: str) -> int:
-    """Parse ISO end date to unix timestamp; fallback to next window boundary."""
+def _parse_end_date(end_date: str, slug: str = "") -> int:
+    """Parse ISO end date to unix timestamp.
+
+    The Gamma API sometimes returns endDate as a bare date ("2026-03-21") with no
+    time component, which fromisoformat() parses to midnight UTC — far in the past
+    relative to intra-day 5-minute windows.  When that happens (seconds == 0), fall
+    back to deriving the close time from the slug, which encodes the exact window-open
+    timestamp as its trailing integer.  If the slug is unavailable, use the next
+    computed window boundary.
+    """
+    import datetime
     if end_date:
         try:
-            import datetime
             dt = datetime.datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-            return int(dt.timestamp())
+            ts = int(dt.timestamp())
+            # Date-only strings parse to midnight; treat as unusable
+            if dt.hour != 0 or dt.minute != 0 or dt.second != 0:
+                return ts
         except Exception:
             pass
+
+    # Try to extract close time from the slug (format: btc-updown-5m-<open_ts>)
+    if slug:
+        try:
+            parts = slug.rsplit("-", 1)
+            open_ts = int(parts[-1])
+            window_type = slug.split("-")[2]  # "5m" or "15m"
+            interval = config.WINDOW_SECONDS.get(window_type, config.WINDOW_INTERVAL)
+            return open_ts + interval
+        except Exception:
+            pass
+
     interval = config.WINDOW_INTERVAL
     now_ts = int(time.time())
     return now_ts - (now_ts % interval) + interval
