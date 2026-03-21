@@ -170,10 +170,30 @@ async def fetch_market(slug: str, session: aiohttp.ClientSession) -> Optional[Ma
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _extract_all_tokens(market: dict) -> list:
-    """Return all token objects from a market dict (handles both flat and nested)."""
+    """Return all token objects from a market dict.
+
+    Handles three Gamma API shapes:
+      Shape A — tokens[]: [{tokenId/token_id, outcome, price}, ...]
+      Shape B — clobTokenIds[]: paired with outcomes[] and outcomePrices[]
+      Shape C — empty / missing tokens (caller will dig into sub-markets)
+    """
+    # Shape A: explicit tokens array with objects
     tokens = market.get("tokens") or []
-    if isinstance(tokens, list):
+    if isinstance(tokens, list) and tokens:
         return list(tokens)
+
+    # Shape B: clobTokenIds paired with outcomes / outcomePrices
+    clob_ids = market.get("clobTokenIds") or []
+    outcomes = market.get("outcomes") or []
+    prices = market.get("outcomePrices") or []
+    if isinstance(clob_ids, list) and clob_ids:
+        result = []
+        for i, tid in enumerate(clob_ids):
+            outcome = outcomes[i] if i < len(outcomes) else ""
+            price = prices[i] if i < len(prices) else "0.50"
+            result.append({"tokenId": tid, "outcome": outcome, "price": price})
+        return result
+
     return []
 
 

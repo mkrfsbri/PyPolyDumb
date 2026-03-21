@@ -177,6 +177,21 @@ class TestFetchMarketParsing(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(tokens), 2)
         self.assertEqual(tokens[0]["tokenId"], "aaa")
 
+    def test_extract_tokens_clob_token_ids(self):
+        """Shape B: clobTokenIds paired with outcomes/outcomePrices (real Gamma API format)."""
+        from core.market_discovery import _extract_all_tokens
+        market = {
+            "clobTokenIds": ["UP_ID", "DN_ID"],
+            "outcomes": ["Up", "Down"],
+            "outcomePrices": ["0.58", "0.42"],
+        }
+        tokens = _extract_all_tokens(market)
+        self.assertEqual(len(tokens), 2)
+        self.assertEqual(tokens[0]["tokenId"], "UP_ID")
+        self.assertEqual(tokens[0]["outcome"], "Up")
+        self.assertAlmostEqual(float(tokens[0]["price"]), 0.58)
+        self.assertEqual(tokens[1]["tokenId"], "DN_ID")
+
     def test_extract_tokens_missing(self):
         """No tokens field → empty list."""
         from core.market_discovery import _extract_all_tokens
@@ -283,6 +298,39 @@ class TestFetchMarketParsing(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.up_token_id, "UP_SNAKE")
         self.assertEqual(result.down_token_id, "DN_SNAKE")
+
+    async def test_fetch_market_clob_token_ids(self):
+        """Shape B: real Gamma API format with clobTokenIds + outcomes + outcomePrices."""
+        from unittest.mock import AsyncMock, MagicMock
+        from core.market_discovery import fetch_market
+
+        fake_response = [{
+            "conditionId": "0x" + "e" * 64,
+            "slug": "btc-updown-5m-1000000200",
+            "endDateIso": "2001-09-08T21:50:00Z",
+            "tokens": [],
+            "clobTokenIds": ["UP_CLOB", "DN_CLOB"],
+            "outcomes": ["Up", "Down"],
+            "outcomePrices": ["0.58", "0.42"],
+        }]
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=fake_response)
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_cm)
+
+        result = await fetch_market("btc-updown-5m-1000000200", mock_session)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.up_token_id, "UP_CLOB")
+        self.assertEqual(result.down_token_id, "DN_CLOB")
+        self.assertAlmostEqual(result.up_price, 0.58)
+        self.assertAlmostEqual(result.down_price, 0.42)
 
 
 if __name__ == "__main__":
