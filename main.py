@@ -223,7 +223,12 @@ class BotOrchestrator:
             size_multiplier=self.guard.size_multiplier,
         )
 
-        if size <= 0:
+        # Fixed-size strategies bypass Kelly (Kelly requires win_prob > entry_price
+        # which the confidence scores for these strategies don't represent).
+        # Apply overrides BEFORE the size <= 0 guard so they aren't skipped.
+        if strategy.NAME in ("pair_cost_avg", "endcycle_sniper"):
+            size = min(5.0, self.bankroll.available)
+        elif size <= 0:
             log.debug("Zero size for %s — skipping", strategy.NAME)
             return
 
@@ -232,13 +237,6 @@ class BotOrchestrator:
         if not ok:
             log.warning("Risk limit rejected %s trade: %s", strategy.NAME, reason)
             return
-
-        # Fixed-size strategies bypass Kelly (Kelly requires win_prob > entry_price
-        # which the confidence scores for these strategies don't represent).
-        if strategy.NAME == "pair_cost_avg":
-            size = min(5.0, self.bankroll.available)
-        elif strategy.NAME == "endcycle_sniper":
-            size = min(5.0, self.bankroll.available)
 
         log.info("Placing %s %s order | strategy=%s price=%.3f size=$%.2f conf=%.2f",
                  signal.direction, market.slug, strategy.NAME,
@@ -340,7 +338,11 @@ class BotOrchestrator:
     async def _on_pnl_update(self, position, pnl: float):
         """Called when a position is settled."""
         self.bankroll.realize_pnl(pnl)
-        self.guard.record_win() if pnl > 0 else self.guard.record_loss()
+        # PUSH (pnl == 0, outcome == "PUSH") is a forced expiry, not a real loss.
+        if pnl > 0:
+            self.guard.record_win()
+        elif position.outcome != "PUSH":
+            self.guard.record_loss()
         self.guard.check_daily_loss(self.tracker._current_daily_pnl())
 
         # Log to SQLite (find trade by order strategy+slug+direction)
