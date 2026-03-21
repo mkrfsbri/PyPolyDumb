@@ -204,17 +204,37 @@ class PositionTracker:
                 active = market.get("active", True)
                 closed = market.get("closed", False)
                 if not active or closed:
+                    # Shape A: tokens list with price field
                     for token in tokens:
                         price = float(token.get("price") or 0)
                         if price >= 0.99:
                             outcome = (token.get("outcome") or "").upper()
                             direction = "UP" if "UP" in outcome or outcome == "YES" else "DOWN"
-                            log.debug("Resolution via price fallback: %s → %s", slug, direction)
+                            log.debug("Resolution via token price: %s → %s", slug, direction)
                             return WindowResult(
                                 slug=slug,
                                 direction=direction,
                                 resolved_at=time.time(),
                             )
+
+                    # Shape B: outcomePrices / outcomes / clobTokenIds (all JSON strings)
+                    raw_prices = market.get("outcomePrices")
+                    raw_outcomes = market.get("outcomes")
+                    if raw_prices and raw_outcomes:
+                        if isinstance(raw_prices, str):
+                            raw_prices = json.loads(raw_prices)
+                        if isinstance(raw_outcomes, str):
+                            raw_outcomes = json.loads(raw_outcomes)
+                        for outcome_label, price_str in zip(raw_outcomes, raw_prices):
+                            if float(price_str) >= 0.99:
+                                outcome = str(outcome_label).upper()
+                                direction = "UP" if "UP" in outcome or outcome == "YES" else "DOWN"
+                                log.debug("Resolution via outcomePrices: %s → %s", slug, direction)
+                                return WindowResult(
+                                    slug=slug,
+                                    direction=direction,
+                                    resolved_at=time.time(),
+                                )
         except Exception:
             pass
         return None
