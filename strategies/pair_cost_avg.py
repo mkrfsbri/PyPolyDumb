@@ -1,12 +1,15 @@
 """
 Strategy #2: Pair Cost Averaging (Gabagool Strategy)
 
-Market-neutral — doesn't predict direction.
-Buys UP and DOWN tokens asynchronously when either side is cheap.
-Profit is guaranteed if total pair cost < $1.00.
+Market-neutral — tidak perlu prediksi arah BTC.
+Masuk HANYA ketika up_ask + down_ask < MAX_PAIR_COST (profit terkunci).
 
-pair_cost = (spent_UP + spent_DOWN) / min(qty_UP, qty_DOWN)
-profit    = min(qty_UP, qty_DOWN) × (1.00 - pair_cost)
+Flow:
+  Leg 1: Beli sisi yang lebih murah
+  Leg 2: Beli sisi lainnya selama combined cost masih < MAX_PAIR_COST
+
+pair_cost = leg1_price + leg2_price
+profit    = shares × (1.00 - pair_cost)
 
 Win rate: ~95-98%
 """
@@ -19,21 +22,21 @@ from strategies.base_strategy import BaseStrategy, MarketState, Signal
 
 log = logging.getLogger(__name__)
 
-TRIGGER_PRICE = config.PAIR_COST_TRIGGER   # Buy side when price < $0.35
-MAX_PAIR_COST = config.PAIR_COST_MAX        # Only hedge if pair_cost < $0.97
-MAX_LEGS_PER_SIDE = 3                       # Max top-ups per side per window
+MAX_PAIR_COST = config.PAIR_COST_MAX   # 0.97
 
 
 @dataclass
 class PairState:
-    """Per-window state for the Gabagool strategy."""
+    """Per-window state."""
     slug: str
     spent_up: float = 0.0
     spent_down: float = 0.0
     qty_up: float = 0.0
     qty_down: float = 0.0
-    legs_up: int = 0
-    legs_down: int = 0
+    legs_up: int = 0       # max 1
+    legs_down: int = 0     # max 1
+    leg1_price: float = 0.0
+    leg1_direction: str = ""
     completed: bool = False
 
     def pair_cost(self) -> float:
@@ -48,12 +51,6 @@ class PairState:
         if cost >= 1.0:
             return 0.0
         return matched_qty * (1.0 - cost)
-
-    def avg_up_cost(self) -> float:
-        return self.spent_up / self.qty_up if self.qty_up > 0 else 0.0
-
-    def avg_down_cost(self) -> float:
-        return self.spent_down / self.qty_down if self.qty_down > 0 else 0.0
 
 
 class PairCostAvg(BaseStrategy):
@@ -72,79 +69,93 @@ class PairCostAvg(BaseStrategy):
         pair = self._get_state(state.market.slug)
 
         if pair.completed:
-            return Signal(reason="Pair already completed this window")
+            return Signal(reason="Pair sudah complete window ini")
+
+        # Tidak masuk di 30s terakhir — tidak ada waktu untuk leg 2
+        if state.seconds_remaining < 30:
+            return Signal(reason="Terlalu dekat window end")
 
         up_ask = state.up_ask
         down_ask = state.down_ask
 
-        # Check if we should buy UP leg
-        if (up_ask <= TRIGGER_PRICE
-                and pair.legs_up < MAX_LEGS_PER_SIDE
-                and not self._would_exceed_pair_cost(pair, "UP", up_ask, state)):
-            return Signal(
-                direction="UP",
-                confidence=0.97,
-                suggested_price=up_ask,
-                suggested_size=0.0,
-                reason=f"UP cheap at {up_ask:.3f} | pair_cost would be "
-                       f"{self._projected_cost(pair, 'UP', up_ask):.3f}",
-            )
-
-        # Check if we should buy DOWN leg
-        if (down_ask <= TRIGGER_PRICE
-                and pair.legs_down < MAX_LEGS_PER_SIDE
-                and not self._would_exceed_pair_cost(pair, "DOWN", down_ask, state)):
-            return Signal(
-                direction="DOWN",
-                confidence=0.97,
-                suggested_price=down_ask,
-                suggested_size=0.0,
-                reason=f"DOWN cheap at {down_ask:.3f} | pair_cost would be "
-                       f"{self._projected_cost(pair, 'DOWN', down_ask):.3f}",
-            )
-
-        # Check if we should COMPLETE the pair (one side very cheap as hedge)
-        if pair.qty_up > 0 and pair.qty_down == 0 and down_ask < 0.50:
-            projected = self._projected_cost(pair, "DOWN", down_ask)
-            if projected < MAX_PAIR_COST:
+        # ── Leg 1: Belum ada posisi — masuk hanya kalau pair profitable ────────
+        if pair.legs_up == 0 and pair.legs_down == 0:
+            combined = up_ask + down_ask
+            if combined >= MAX_PAIR_COST:
                 return Signal(
-                    direction="DOWN",
-                    confidence=0.95,
-                    suggested_price=down_ask,
-                    suggested_size=0.0,
-                    reason=f"Completing pair: DOWN hedge at {down_ask:.3f} "
-                           f"(projected pair_cost={projected:.3f})",
+                    reason=f"Pair cost {combined:.3f} ≥ {MAX_PAIR_COST} — tidak ada edge"
                 )
-
-        if pair.qty_down > 0 and pair.qty_up == 0 and up_ask < 0.50:
-            projected = self._projected_cost(pair, "UP", up_ask)
-            if projected < MAX_PAIR_COST:
+            # Beli sisi yang lebih murah duluan
+            if up_ask <= down_ask:
                 return Signal(
                     direction="UP",
-                    confidence=0.95,
+                    confidence=0.97,
                     suggested_price=up_ask,
                     suggested_size=0.0,
-                    reason=f"Completing pair: UP hedge at {up_ask:.3f} "
-                           f"(projected pair_cost={projected:.3f})",
+                    reason=f"Leg 1 UP @ {up_ask:.3f} | combined={combined:.3f}",
+                )
+            else:
+                return Signal(
+                    direction="DOWN",
+                    confidence=0.97,
+                    suggested_price=down_ask,
+                    suggested_size=0.0,
+                    reason=f"Leg 1 DOWN @ {down_ask:.3f} | combined={combined:.3f}",
                 )
 
-        return Signal(reason="No pair cost opportunity")
+        # ── Leg 2: Satu sisi sudah dipasang — lengkapi pair ───────────────────
+        if pair.legs_up == 1 and pair.legs_down == 0:
+            combined = pair.leg1_price + down_ask
+            if combined < MAX_PAIR_COST:
+                return Signal(
+                    direction="DOWN",
+                    confidence=0.97,
+                    suggested_price=down_ask,
+                    suggested_size=0.0,
+                    reason=f"Leg 2 DOWN @ {down_ask:.3f} | combined={combined:.3f}",
+                )
+            return Signal(
+                reason=f"Menunggu DOWN murah: leg1={pair.leg1_price:.3f} + down={down_ask:.3f}"
+                       f" = {pair.leg1_price + down_ask:.3f} ≥ {MAX_PAIR_COST}"
+            )
+
+        if pair.legs_down == 1 and pair.legs_up == 0:
+            combined = pair.leg1_price + up_ask
+            if combined < MAX_PAIR_COST:
+                return Signal(
+                    direction="UP",
+                    confidence=0.97,
+                    suggested_price=up_ask,
+                    suggested_size=0.0,
+                    reason=f"Leg 2 UP @ {up_ask:.3f} | combined={combined:.3f}",
+                )
+            return Signal(
+                reason=f"Menunggu UP murah: leg1={pair.leg1_price:.3f} + up={up_ask:.3f}"
+                       f" = {pair.leg1_price + up_ask:.3f} ≥ {MAX_PAIR_COST}"
+            )
+
+        # Kedua legs sudah dipasang, tunggu fills
+        return Signal(reason="Kedua legs dipasang, menunggu fills")
 
     def should_trade(self, signal: Signal, state: MarketState) -> bool:
         return signal.is_actionable()
 
-    def record_order_placed(self, slug: str, direction: str):
-        """Called immediately on order placement to block duplicate orders before fill."""
+    def record_order_placed(self, slug: str, direction: str, price: float):
+        """Dipanggil segera saat order dikirim — mencegah duplikat sebelum fill."""
         pair = self._get_state(slug)
         if direction == "UP":
             pair.legs_up += 1
         else:
             pair.legs_down += 1
-        log.debug("PairCostAvg order placed: %s %s legs_up=%d legs_down=%d",
-                  direction, slug, pair.legs_up, pair.legs_down)
+        # Simpan harga leg 1 untuk cek combined cost di leg 2
+        if pair.legs_up + pair.legs_down == 1:
+            pair.leg1_price = price
+            pair.leg1_direction = direction
+        log.info("PairCostAvg order placed: %s %s @ %.3f | legs_up=%d legs_down=%d",
+                 direction, slug, price, pair.legs_up, pair.legs_down)
 
     def record_fill(self, slug: str, direction: str, price: float, size_usdc: float):
-        """Called when an order fills — updates qty/spend. legs already counted at placement."""
+        """Dipanggil saat order fill — update qty/spend untuk hitung pair cost."""
         pair = self._get_state(slug)
         shares = size_usdc / price
         if direction == "UP":
@@ -156,8 +167,8 @@ class PairCostAvg(BaseStrategy):
 
         cost = pair.pair_cost()
         profit = pair.potential_profit()
-        cost_str = "unmatched (one side only)" if cost >= 99.0 else f"{cost:.4f}"
-        log.info("PairCostAvg fill: %s side at %.3f | pair_cost=%s potential_profit=%.4f",
+        cost_str = "satu sisi saja" if cost >= 99.0 else f"{cost:.4f}"
+        log.info("PairCostAvg fill: %s @ %.3f | pair_cost=%s potential_profit=%.4f USDC",
                  direction, price, cost_str, profit)
 
         if pair.qty_up > 0 and pair.qty_down > 0 and cost < MAX_PAIR_COST:
@@ -176,36 +187,3 @@ class PairCostAvg(BaseStrategy):
             "potential_profit": pair.potential_profit(),
             "completed": pair.completed,
         }
-
-    # ── Internal ──────────────────────────────────────────────────────────────
-
-    def _projected_cost(self, pair: PairState, direction: str, price: float) -> float:
-        """Estimate pair cost if we buy one more leg on direction at price."""
-        size = 5.0   # $5 per leg for estimation
-        shares = size / price
-        if direction == "UP":
-            new_spent_up = pair.spent_up + size
-            new_qty_up = pair.qty_up + shares
-            matched = min(new_qty_up, pair.qty_down)
-            if matched <= 0:
-                return 99.0
-            return (new_spent_up + pair.spent_down) / matched
-        else:
-            new_spent_down = pair.spent_down + size
-            new_qty_down = pair.qty_down + shares
-            matched = min(pair.qty_up, new_qty_down)
-            if matched <= 0:
-                return 99.0
-            return (pair.spent_up + new_spent_down) / matched
-
-    def _would_exceed_pair_cost(
-        self, pair: PairState, direction: str, price: float, state: MarketState
-    ) -> bool:
-        # If there's no matching side yet, allow the first leg freely.
-        # The pair cost check only applies once BOTH sides have holdings.
-        if direction == "UP" and pair.qty_down == 0:
-            return False
-        if direction == "DOWN" and pair.qty_up == 0:
-            return False
-        projected = self._projected_cost(pair, direction, price)
-        return projected >= MAX_PAIR_COST

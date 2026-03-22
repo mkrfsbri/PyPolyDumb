@@ -306,9 +306,8 @@ class BotOrchestrator:
         elif hasattr(strategy, "record_trade"):
             strategy.record_trade(market.slug)
         elif strategy.NAME == "pair_cost_avg" and hasattr(strategy, "record_order_placed"):
-            # Immediately count the leg so the next eval cycle doesn't place a duplicate.
-            # record_fill() updates qty/spend when the order actually fills.
-            strategy.record_order_placed(market.slug, signal.direction)
+            # Pass price so Phase 2 combined cost check uses real leg1 price.
+            strategy.record_order_placed(market.slug, signal.direction, signal.suggested_price)
 
         # Dashboard broadcast
         try:
