@@ -50,7 +50,9 @@ ENDCYCLE_MED_SCORE: float = 7.0     # lowered from 10 — real markets rarely ex
 ENDCYCLE_ACTIVATION_SECS: int = 30  # activate T-30s before window end
 ENDCYCLE_DEACTIVATE_SECS: int = 10  # stop at T-10s
 
-PAIR_COST_MAX: float = 0.97         # max combined (up+down) cost to enter
+PAIR_COST_MAX: float = 1.02         # max combined (up+down) ask to enter a pair
+                                    # binary asks structurally sum to ~1.00-1.04;
+                                    # ≤0.97 was unreachable — strategy never fired
 PAIR_LEG3_THRESHOLD: float = 0.85  # token price min to trigger Leg 3 momentum bet
 PAIR_LEG3_ACTIVATION: int = 15     # seconds remaining to activate Leg 3
 MAX_SHARES_PER_LEG: int = 10       # fixed shares per leg (pair_cost_avg + endcycle_sniper)

@@ -1,19 +1,20 @@
 """
 Strategy #2: Pair Cost Averaging (Gabagool Strategy)
 
-Market-neutral — tidak perlu prediksi arah BTC.
-Masuk HANYA ketika up_ask + down_ask < MAX_PAIR_COST (profit terkunci).
+Masuk kedua sisi (UP+DOWN) di awal window, profit dari Leg 3 momentum.
 
 Flow 3 Leg:
-  Leg 1 : Beli sisi lebih murah ketika combined < 0.97
-  Leg 2 : Beli sisi lainnya — pair cost terkunci
+  Leg 1 : Beli sisi lebih murah ketika combined ≤ MAX_PAIR_COST (1.02)
+  Leg 2 : Beli sisi lainnya — pair terkunci
   Leg 3 : T-15s, setelah pair complete — beli sisi yang mendekati 1.0
-           (momentum confirmation, near-certain winner)
+           (near-certain winner momentum bet)
 
-pair_cost = leg1_price + leg2_price
-profit    = shares × (1.00 - pair_cost)  +  leg3 directional profit
+Ekonomi:
+  combined ask di binary market selalu ~1.00-1.04 (ask > mid)
+  Pair cost ≈ 1.01 → spread loss ~$0.10/10 shares (small)
+  Leg 3 @ 0.85 → gain = 10×(1.00-0.85) = +$1.50 jika menang
 
-Win rate: ~95-98% (pair) | ~85-95% (leg 3 momentum)
+Win rate: ~85-95% (Leg 3 momentum)
 """
 
 import logging
