@@ -256,14 +256,19 @@ class BotOrchestrator:
                  signal.direction, market.slug, strategy.NAME,
                  signal.suggested_price, size, signal.confidence)
 
-        # Place order
+        # Place order — use per-signal TTL if set, else fall back to strategy default
+        cancel_secs = (
+            signal.cancel_after_secs
+            if signal.cancel_after_secs is not None
+            else self._cancel_secs(strategy.NAME)
+        )
         order = await self.order_mgr.place_order(
             token_id=token_id,
             side="BUY",
             price=signal.suggested_price,
             size=size,
             strategy=strategy.NAME,
-            cancel_after_secs=self._cancel_secs(strategy.NAME),
+            cancel_after_secs=cancel_secs,
             fee_rate_bps=0,  # maker = zero fee
         )
 
@@ -453,7 +458,7 @@ class BotOrchestrator:
     def _cancel_secs(strategy_name: str) -> Optional[float]:
         """Order auto-cancel timeout per strategy."""
         cancel_map = {
-            "pair_cost_avg": 120.0,   # Leg 1 at mid needs up to 2 min; Leg 2/3 at ask fill fast
+            "pair_cost_avg": 120.0,   # fallback — normally overridden by signal.cancel_after_secs
             "endcycle_sniper": 20.0,
             "latency_arb": config.LATENCY_CANCEL_SECS,
             "flash_crash": 30.0,

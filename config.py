@@ -50,9 +50,11 @@ ENDCYCLE_MED_SCORE: float = 7.0     # lowered from 10 — real markets rarely ex
 ENDCYCLE_ACTIVATION_SECS: int = 30  # activate T-30s before window end
 ENDCYCLE_DEACTIVATE_SECS: int = 10  # stop at T-10s
 
-PAIR_COST_MAX: float = 1.02         # max combined (up+down) ask to enter a pair
-                                    # binary asks structurally sum to ~1.00-1.04;
-                                    # ≤0.97 was unreachable — strategy never fired
+PAIR_COST_MAX: float = 0.97         # max combined pair cost to lock — guarantees profit
+PAIR_LEG_DISCOUNT: float = 0.02    # limit order placed this many cents below ask
+PAIR_LEG1_TTL: int = 120           # seconds before Leg 1 order auto-cancels
+PAIR_LEG2_TTL: int = 90            # seconds before Leg 2 order auto-cancels
+PAIR_MIN_ENTRY_SECS: int = 255     # only enter Leg 1 if window >= this (5m: first ~45s)
 PAIR_LEG3_THRESHOLD: float = 0.85  # token price min to trigger Leg 3 momentum bet
 PAIR_LEG3_MAX_PRICE: float = 0.99  # token price max — skip if >= 0.99 (no upside left)
 PAIR_LEG3_ACTIVATION: int = 15     # seconds remaining to activate Leg 3

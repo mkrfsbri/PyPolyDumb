@@ -1,50 +1,66 @@
 """
 Strategy #2: Pair Cost Averaging (Gabagool Strategy)
 
-Masuk kedua sisi (UP+DOWN) di awal window, profit dari Leg 3 momentum.
+Masuk kedua sisi (UP+DOWN) secara sequential dengan limit order di bawah ask,
+sehingga pair_cost < 0.97 — profit terkunci terlepas dari outcome.
 
 Flow 3 Leg:
-  Leg 1 : Beli sisi lebih murah ketika combined ≤ MAX_PAIR_COST (1.02)
-  Leg 2 : Beli sisi lainnya — pair terkunci
+  Leg 1 : Limit order di sisi lebih murah @ ask - PAIR_LEG_DISCOUNT
+           Hanya masuk di ~45 detik pertama window (PAIR_MIN_ENTRY_SECS)
+           TTL = PAIR_LEG1_TTL (120s)
+  Leg 2 : Setelah Leg 1 fill — limit order sisi lain @ (0.97 - leg1_fill_price)
+           Harga dinamis: selalu menghasilkan pair_cost tepat 0.97
+           TTL = PAIR_LEG2_TTL (90s)
   Leg 3 : T-15s, setelah pair complete — beli sisi yang mendekati 1.0
            (near-certain winner momentum bet)
 
 Ekonomi:
-  combined ask di binary market selalu ~1.00-1.04 (ask > mid)
-  Pair cost ≈ 1.01 → spread loss ~$0.10/10 shares (small)
-  Leg 3 @ 0.85 → gain = 10×(1.00-0.85) = +$1.50 jika menang
-
-Win rate: ~85-95% (Leg 3 momentum)
+  Leg 1 fill @ 0.482, Leg 2 target = 0.97 - 0.482 = 0.488
+  pair_cost = 0.970 → guaranteed +$0.30 per 10 shares
+  Leg 3 @ 0.87 → gain = 10×(1.00-0.87) = +$1.30 jika menang
 """
 
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 import config
 from strategies.base_strategy import BaseStrategy, MarketState, Signal
 
 log = logging.getLogger(__name__)
 
-MAX_PAIR_COST   = config.PAIR_COST_MAX        # 0.97
-LEG3_THRESHOLD  = config.PAIR_LEG3_THRESHOLD  # 0.85 — token price min to trigger leg 3
-LEG3_MAX_PRICE  = config.PAIR_LEG3_MAX_PRICE  # 0.99 — skip if >= 0.99 (no upside left)
-LEG3_ACTIVATION = config.PAIR_LEG3_ACTIVATION # 15s remaining
+MAX_PAIR_COST    = config.PAIR_COST_MAX        # 0.97
+LEG_DISCOUNT     = config.PAIR_LEG_DISCOUNT    # 0.02
+LEG1_TTL         = config.PAIR_LEG1_TTL        # 120s
+LEG2_TTL         = config.PAIR_LEG2_TTL        # 90s
+MIN_ENTRY_SECS   = config.PAIR_MIN_ENTRY_SECS  # 255s — only enter in first ~45s of 5m window
+LEG3_THRESHOLD   = config.PAIR_LEG3_THRESHOLD  # 0.85
+LEG3_MAX_PRICE   = config.PAIR_LEG3_MAX_PRICE  # 0.99
+LEG3_ACTIVATION  = config.PAIR_LEG3_ACTIVATION # 15s
 
 
 @dataclass
 class PairState:
     """Per-window state."""
     slug: str
-    # Pair legs (1 per side)
+
+    # Placement tracking (prevents duplicate orders before fill confirmation)
+    legs_placed_up: int = 0
+    legs_placed_down: int = 0
+    leg1_direction: str = ""
+    leg1_order_price: float = 0.0
+    leg1_placed_at: float = 0.0     # timestamp when Leg 1 was placed
+
+    # Fill tracking
+    legs_filled_up: int = 0
+    legs_filled_down: int = 0
+    leg1_fill_price: float = 0.0    # actual fill price — used for dynamic Leg 2 pricing
     spent_up: float = 0.0
     spent_down: float = 0.0
     qty_up: float = 0.0
     qty_down: float = 0.0
-    legs_up: int = 0
-    legs_down: int = 0
-    leg1_price: float = 0.0
-    leg1_direction: str = ""
     completed: bool = False
+
     # Leg 3 — momentum confirmation at end-cycle
     leg3_placed: bool = False
     leg3_direction: str = ""
@@ -64,6 +80,21 @@ class PairState:
         if cost >= 1.0:
             return 0.0
         return matched_qty * (1.0 - cost)
+
+    def leg1_placed(self) -> bool:
+        return (self.legs_placed_up + self.legs_placed_down) == 1
+
+    def leg1_filled(self) -> bool:
+        return (self.legs_filled_up + self.legs_filled_down) >= 1
+
+    def leg1_expired(self) -> bool:
+        """Leg 1 was placed but TTL elapsed without fill."""
+        if not self.leg1_placed() or self.leg1_filled():
+            return False
+        return time.time() - self.leg1_placed_at > LEG1_TTL + 5  # 5s grace
+
+    def leg2_placed(self) -> bool:
+        return self.legs_placed_up >= 1 and self.legs_placed_down >= 1
 
 
 class PairCostAvg(BaseStrategy):
@@ -85,105 +116,116 @@ class PairCostAvg(BaseStrategy):
         secs = state.seconds_remaining
 
         # ── Leg 3: Pair complete + near resolution ────────────────────────────
-        # Aktif di T-15s. Cek apakah salah satu token mendekati 1.0 (hampir menang).
-        # Jika ya, beli sisi yang pasti profit sebagai directional momentum bet.
         if pair.completed and not pair.leg3_placed and secs <= LEG3_ACTIVATION:
             if LEG3_THRESHOLD <= up_ask < LEG3_MAX_PRICE:
-                log.info(
-                    "PairCostAvg Leg 3: UP mendekati resolusi @ %.3f (T-%.0fs)",
-                    up_ask, secs,
-                )
+                log.info("PairCostAvg Leg 3: UP @ %.3f (T-%.0fs)", up_ask, secs)
                 return Signal(
                     direction="UP",
                     confidence=min(0.99, up_ask),
                     suggested_price=up_ask,
                     suggested_size=0.0,
-                    reason=f"Leg 3 UP momentum @ {up_ask:.3f} — T-{secs:.0f}s",
+                    reason=f"Leg 3 UP @ {up_ask:.3f} — T-{secs:.0f}s",
+                    cancel_after_secs=secs,
                 )
             if LEG3_THRESHOLD <= down_ask < LEG3_MAX_PRICE:
-                log.info(
-                    "PairCostAvg Leg 3: DOWN mendekati resolusi @ %.3f (T-%.0fs)",
-                    down_ask, secs,
-                )
+                log.info("PairCostAvg Leg 3: DOWN @ %.3f (T-%.0fs)", down_ask, secs)
                 return Signal(
                     direction="DOWN",
                     confidence=min(0.99, down_ask),
                     suggested_price=down_ask,
                     suggested_size=0.0,
-                    reason=f"Leg 3 DOWN momentum @ {down_ask:.3f} — T-{secs:.0f}s",
+                    reason=f"Leg 3 DOWN @ {down_ask:.3f} — T-{secs:.0f}s",
+                    cancel_after_secs=secs,
                 )
             if up_ask >= LEG3_MAX_PRICE or down_ask >= LEG3_MAX_PRICE:
-                log.info(
-                    "PairCostAvg Leg 3: SKIP — harga %.3f/%.3f >= %.2f, tidak ada upside",
-                    up_ask, down_ask, LEG3_MAX_PRICE,
-                )
+                log.info("PairCostAvg Leg 3: SKIP — %.3f/%.3f >= %.2f, no upside",
+                         up_ask, down_ask, LEG3_MAX_PRICE)
 
-        # Setelah pair complete, hanya Leg 3 yang bisa aktif
         if pair.completed:
-            return Signal(reason="Pair complete — menunggu Leg 3 window (T-15s)")
+            return Signal(reason="Pair complete — menunggu Leg 3 (T-15s)")
 
-        # ── Leg 1: Belum ada posisi — masuk hanya kalau pair profitable ────────
-        if pair.legs_up == 0 and pair.legs_down == 0:
-            # Tidak masuk di 30s terakhir — tidak ada waktu untuk leg 2
-            if secs < 30:
-                return Signal(reason="Terlalu dekat window end untuk Leg 1")
-            combined = up_ask + down_ask
-            if combined >= MAX_PAIR_COST:
+        # ── Leg 1 expired without fill → skip window ─────────────────────────
+        if pair.leg1_expired():
+            return Signal(reason="Leg 1 expired without fill — skip window")
+
+        # ── Leg 1 placed, waiting for fill ───────────────────────────────────
+        if pair.leg1_placed() and not pair.leg1_filled():
+            return Signal(reason=f"Leg 1 {pair.leg1_direction} @ {pair.leg1_order_price:.3f} — waiting fill")
+
+        # ── Leg 2: Leg 1 filled, place other side ────────────────────────────
+        if pair.leg1_filled() and not pair.leg2_placed():
+            min_secs_needed = LEG2_TTL + LEG3_ACTIVATION + 30  # 135s
+            if secs < min_secs_needed:
                 return Signal(
-                    reason=f"Pair cost {combined:.3f} ≥ {MAX_PAIR_COST} — tidak ada edge"
+                    reason=f"Tidak cukup waktu Leg 2 ({secs:.0f}s < {min_secs_needed}s)"
                 )
-            # Leg 1 uses mid price (not ask) to improve pair_cost by ~1-2 cents.
-            # A mid-price limit order fills slower but the window gives plenty of time.
-            # Leg 2 uses ask to complete the hedge quickly once Leg 1 is confirmed.
-            up_mid = state.up_price
-            down_mid = state.down_price
-            if up_ask <= down_ask:
+
+            # Dynamic pricing: exactly locks pair_cost = 0.97
+            leg2_target = round(MAX_PAIR_COST - pair.leg1_fill_price, 3)
+            if leg2_target <= 0.01:
+                return Signal(reason=f"Leg 2 target tidak valid: {leg2_target:.3f}")
+
+            if pair.legs_filled_up >= 1:
+                log.info("PairCostAvg Leg 2: DOWN @ %.3f (0.97 - %.3f) ask=%.3f",
+                         leg2_target, pair.leg1_fill_price, down_ask)
                 return Signal(
-                    direction="UP",
+                    direction="DOWN",
                     confidence=0.97,
-                    suggested_price=up_mid,
+                    suggested_price=leg2_target,
                     suggested_size=0.0,
-                    reason=f"Leg 1 UP @ {up_mid:.3f} (mid) | ask_combined={combined:.3f}",
+                    reason=f"Leg 2 DOWN @ {leg2_target:.3f} = 0.97 - {pair.leg1_fill_price:.3f}",
+                    cancel_after_secs=float(LEG2_TTL),
                 )
             else:
-                return Signal(
-                    direction="DOWN",
-                    confidence=0.97,
-                    suggested_price=down_mid,
-                    suggested_size=0.0,
-                    reason=f"Leg 1 DOWN @ {down_mid:.3f} (mid) | ask_combined={combined:.3f}",
-                )
-
-        # ── Leg 2: Satu sisi sudah dipasang — lengkapi pair ───────────────────
-        if pair.legs_up == 1 and pair.legs_down == 0:
-            combined = pair.leg1_price + down_ask
-            if combined < MAX_PAIR_COST:
-                return Signal(
-                    direction="DOWN",
-                    confidence=0.97,
-                    suggested_price=down_ask,
-                    suggested_size=0.0,
-                    reason=f"Leg 2 DOWN @ {down_ask:.3f} | combined={combined:.3f}",
-                )
-            return Signal(
-                reason=f"Menunggu DOWN murah: {pair.leg1_price:.3f}+{down_ask:.3f}"
-                       f"={pair.leg1_price + down_ask:.3f} ≥ {MAX_PAIR_COST}"
-            )
-
-        if pair.legs_down == 1 and pair.legs_up == 0:
-            combined = pair.leg1_price + up_ask
-            if combined < MAX_PAIR_COST:
+                log.info("PairCostAvg Leg 2: UP @ %.3f (0.97 - %.3f) ask=%.3f",
+                         leg2_target, pair.leg1_fill_price, up_ask)
                 return Signal(
                     direction="UP",
                     confidence=0.97,
-                    suggested_price=up_ask,
+                    suggested_price=leg2_target,
                     suggested_size=0.0,
-                    reason=f"Leg 2 UP @ {up_ask:.3f} | combined={combined:.3f}",
+                    reason=f"Leg 2 UP @ {leg2_target:.3f} = 0.97 - {pair.leg1_fill_price:.3f}",
+                    cancel_after_secs=float(LEG2_TTL),
                 )
-            return Signal(
-                reason=f"Menunggu UP murah: {pair.leg1_price:.3f}+{up_ask:.3f}"
-                       f"={pair.leg1_price + up_ask:.3f} ≥ {MAX_PAIR_COST}"
-            )
+
+        # ── Leg 1: No position yet ────────────────────────────────────────────
+        if pair.legs_placed_up == 0 and pair.legs_placed_down == 0:
+            # Only enter in first part of window — need time for Leg 2 + Leg 3
+            if secs < MIN_ENTRY_SECS:
+                return Signal(
+                    reason=f"Terlalu telat untuk Leg 1 ({secs:.0f}s < {MIN_ENTRY_SECS}s)"
+                )
+
+            # Sanity check: combined ask shouldn't be wildly wide
+            combined_ask = up_ask + down_ask
+            if combined_ask > 1.10:
+                return Signal(reason=f"Spread terlalu lebar: combined ask={combined_ask:.3f}")
+
+            # Buy cheaper side first — closer to target price, higher fill probability
+            if up_ask <= down_ask:
+                leg1_price = round(up_ask - LEG_DISCOUNT, 3)
+                log.info("PairCostAvg Leg 1: UP @ %.3f (ask=%.3f - %.3f)",
+                         leg1_price, up_ask, LEG_DISCOUNT)
+                return Signal(
+                    direction="UP",
+                    confidence=0.97,
+                    suggested_price=leg1_price,
+                    suggested_size=0.0,
+                    reason=f"Leg 1 UP @ {leg1_price:.3f} (ask={up_ask:.3f} - {LEG_DISCOUNT})",
+                    cancel_after_secs=float(LEG1_TTL),
+                )
+            else:
+                leg1_price = round(down_ask - LEG_DISCOUNT, 3)
+                log.info("PairCostAvg Leg 1: DOWN @ %.3f (ask=%.3f - %.3f)",
+                         leg1_price, down_ask, LEG_DISCOUNT)
+                return Signal(
+                    direction="DOWN",
+                    confidence=0.97,
+                    suggested_price=leg1_price,
+                    suggested_size=0.0,
+                    reason=f"Leg 1 DOWN @ {leg1_price:.3f} (ask={down_ask:.3f} - {LEG_DISCOUNT})",
+                    cancel_after_secs=float(LEG1_TTL),
+                )
 
         return Signal(reason="Kedua legs dipasang, menunggu fills")
 
@@ -191,10 +233,9 @@ class PairCostAvg(BaseStrategy):
         return signal.is_actionable()
 
     def record_order_placed(self, slug: str, direction: str, price: float):
-        """Dipanggil segera saat order dikirim — mencegah duplikat sebelum fill."""
+        """Dipanggil saat order dikirim — mencegah duplikat sebelum fill."""
         pair = self._get_state(slug)
 
-        # Leg 3 jika pair sudah complete
         if pair.completed:
             pair.leg3_placed = True
             pair.leg3_direction = direction
@@ -203,20 +244,21 @@ class PairCostAvg(BaseStrategy):
             return
 
         if direction == "UP":
-            pair.legs_up += 1
+            pair.legs_placed_up += 1
         else:
-            pair.legs_down += 1
+            pair.legs_placed_down += 1
 
-        # Simpan harga leg 1 untuk cek combined cost di leg 2
-        if pair.legs_up + pair.legs_down == 1:
-            pair.leg1_price = price
+        # Track Leg 1 metadata
+        if pair.legs_placed_up + pair.legs_placed_down == 1:
             pair.leg1_direction = direction
+            pair.leg1_order_price = price
+            pair.leg1_placed_at = time.time()
 
-        log.info("PairCostAvg order placed: %s @ %.3f | legs_up=%d legs_down=%d",
-                 direction, price, pair.legs_up, pair.legs_down)
+        log.info("PairCostAvg order placed: %s @ %.3f | placed_up=%d placed_down=%d",
+                 direction, price, pair.legs_placed_up, pair.legs_placed_down)
 
     def record_fill(self, slug: str, direction: str, price: float, size_usdc: float):
-        """Dipanggil saat order fill — update qty/spend."""
+        """Dipanggil saat order fill — update qty/spend dan simpan harga fill Leg 1."""
         pair = self._get_state(slug)
         shares = size_usdc / price
 
@@ -224,19 +266,24 @@ class PairCostAvg(BaseStrategy):
         if pair.leg3_placed and pair.leg3_direction == direction and pair.leg3_qty == 0:
             pair.leg3_qty = shares
             pair.leg3_spent = size_usdc
-            log.info(
-                "PairCostAvg Leg 3 fill: %s @ %.3f — %.2f shares ($%.2f) | T-momentum",
-                direction, price, shares, size_usdc,
-            )
+            log.info("PairCostAvg Leg 3 fill: %s @ %.3f — %.2f shares ($%.2f)",
+                     direction, price, shares, size_usdc)
             return
 
         # Leg 1 / 2 fill
         if direction == "UP":
             pair.spent_up += size_usdc
             pair.qty_up += shares
+            pair.legs_filled_up += 1
         else:
             pair.spent_down += size_usdc
             pair.qty_down += shares
+            pair.legs_filled_down += 1
+
+        # Save actual fill price for dynamic Leg 2 pricing
+        total_filled = pair.legs_filled_up + pair.legs_filled_down
+        if total_filled == 1:
+            pair.leg1_fill_price = price
 
         cost = pair.pair_cost()
         profit = pair.potential_profit()
@@ -246,15 +293,17 @@ class PairCostAvg(BaseStrategy):
 
         if pair.qty_up > 0 and pair.qty_down > 0 and cost < MAX_PAIR_COST:
             pair.completed = True
-            log.info("PairCostAvg: PAIR COMPLETE! slug=%s profit_terkunci=%.4f USDC",
-                     slug, profit)
+            log.info("PairCostAvg: PAIR COMPLETE! slug=%s cost=%.4f profit_terkunci=%.4f USDC",
+                     slug, cost, profit)
 
     def pair_summary(self, slug: str) -> dict:
         pair = self._get_state(slug)
         return {
             "slug": slug,
-            "legs_up": pair.legs_up,
-            "legs_down": pair.legs_down,
+            "leg1_direction": pair.leg1_direction,
+            "leg1_fill_price": pair.leg1_fill_price,
+            "legs_placed": (pair.legs_placed_up, pair.legs_placed_down),
+            "legs_filled": (pair.legs_filled_up, pair.legs_filled_down),
             "pair_cost": pair.pair_cost(),
             "potential_profit": pair.potential_profit(),
             "completed": pair.completed,
