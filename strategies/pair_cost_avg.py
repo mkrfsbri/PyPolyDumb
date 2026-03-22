@@ -26,7 +26,8 @@ from strategies.base_strategy import BaseStrategy, MarketState, Signal
 log = logging.getLogger(__name__)
 
 MAX_PAIR_COST   = config.PAIR_COST_MAX        # 0.97
-LEG3_THRESHOLD  = config.PAIR_LEG3_THRESHOLD  # 0.85 — token price to trigger leg 3
+LEG3_THRESHOLD  = config.PAIR_LEG3_THRESHOLD  # 0.85 — token price min to trigger leg 3
+LEG3_MAX_PRICE  = config.PAIR_LEG3_MAX_PRICE  # 0.99 — skip if >= 0.99 (no upside left)
 LEG3_ACTIVATION = config.PAIR_LEG3_ACTIVATION # 15s remaining
 
 
@@ -87,7 +88,7 @@ class PairCostAvg(BaseStrategy):
         # Aktif di T-15s. Cek apakah salah satu token mendekati 1.0 (hampir menang).
         # Jika ya, beli sisi yang pasti profit sebagai directional momentum bet.
         if pair.completed and not pair.leg3_placed and secs <= LEG3_ACTIVATION:
-            if up_ask >= LEG3_THRESHOLD:
+            if LEG3_THRESHOLD <= up_ask < LEG3_MAX_PRICE:
                 log.info(
                     "PairCostAvg Leg 3: UP mendekati resolusi @ %.3f (T-%.0fs)",
                     up_ask, secs,
@@ -99,7 +100,7 @@ class PairCostAvg(BaseStrategy):
                     suggested_size=0.0,
                     reason=f"Leg 3 UP momentum @ {up_ask:.3f} — T-{secs:.0f}s",
                 )
-            if down_ask >= LEG3_THRESHOLD:
+            if LEG3_THRESHOLD <= down_ask < LEG3_MAX_PRICE:
                 log.info(
                     "PairCostAvg Leg 3: DOWN mendekati resolusi @ %.3f (T-%.0fs)",
                     down_ask, secs,
@@ -110,6 +111,11 @@ class PairCostAvg(BaseStrategy):
                     suggested_price=down_ask,
                     suggested_size=0.0,
                     reason=f"Leg 3 DOWN momentum @ {down_ask:.3f} — T-{secs:.0f}s",
+                )
+            if up_ask >= LEG3_MAX_PRICE or down_ask >= LEG3_MAX_PRICE:
+                log.info(
+                    "PairCostAvg Leg 3: SKIP — harga %.3f/%.3f >= %.2f, tidak ada upside",
+                    up_ask, down_ask, LEG3_MAX_PRICE,
                 )
 
         # Setelah pair complete, hanya Leg 3 yang bisa aktif
