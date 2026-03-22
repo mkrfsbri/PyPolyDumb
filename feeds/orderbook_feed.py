@@ -42,9 +42,9 @@ class OrderbookFeed:
 
     # Minimum price for crash detection — tokens below this are near-expiry,
     # not trading opportunities, and generate false positives at tiny prices.
-    _MIN_CRASH_PRICE = 0.05
+    _MIN_CRASH_PRICE = 0.15
     # Minimum seconds between repeated alerts for the same token.
-    _ALERT_COOLDOWN = 60.0
+    _ALERT_COOLDOWN = 120.0
 
     def __init__(self, ws_manager: PolymarketWebSocket, crash_window_secs: float = 10.0):
         self._ws = ws_manager

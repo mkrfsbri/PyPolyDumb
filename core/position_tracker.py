@@ -134,10 +134,18 @@ class PositionTracker:
         if not pending_slugs:
             return
 
+        # Build window_close_ts per slug so _fetch_resolution can do time-gated
+        # price-based resolution without needing the active/closed API flag.
+        slug_close_ts: dict[str, float] = {}
+        for p in self._positions:
+            if p.window_slug in pending_slugs and p.window_close_ts > 0:
+                slug_close_ts[p.window_slug] = p.window_close_ts
+
         async with aiohttp.ClientSession() as session:
             for slug in pending_slugs:
                 try:
-                    result = await self._fetch_resolution(slug, session)
+                    close_ts = slug_close_ts.get(slug, 0.0)
+                    result = await self._fetch_resolution(slug, session, close_ts)
                     if result:
                         self._resolved_windows[slug] = result
                         self._settle_window(slug, result)
@@ -169,7 +177,8 @@ class PositionTracker:
             self._settle_window(p.window_slug, result)
 
     async def _fetch_resolution(
-        self, slug: str, session: aiohttp.ClientSession
+        self, slug: str, session: aiohttp.ClientSession,
+        window_close_ts: float = 0.0,
     ) -> Optional[WindowResult]:
         url = f"{config.GAMMA_API}/markets"
         params = {"slug": slug}
@@ -184,59 +193,70 @@ class PositionTracker:
 
                 tokens = market.get("tokens", [])
                 if isinstance(tokens, str):
-                    tokens = json.loads(tokens)
+                    try:
+                        tokens = json.loads(tokens)
+                    except Exception:
+                        tokens = []
 
-                # Primary: API has set the resolved flag
+                # ── Path 1: API explicit resolved flag ────────────────────────
                 resolved = market.get("resolved") or market.get("is_resolved") or False
                 if resolved:
+                    # winner_payout on Shape A tokens
                     for token in tokens:
                         if float(token.get("winner_payout") or 0) == 1.0:
                             outcome = (token.get("outcome") or "").upper()
                             direction = "UP" if "UP" in outcome or outcome == "YES" else "DOWN"
-                            return WindowResult(
-                                slug=slug,
-                                direction=direction,
-                                resolved_at=time.time(),
-                            )
+                            log.info("Resolution (resolved flag): %s → %s", slug, direction)
+                            return WindowResult(slug=slug, direction=direction,
+                                                resolved_at=time.time())
 
-                # Fallback: market is closed and one token price has settled to 1.0.
-                # This fires before the resolved flag is set.
+                # ── Path 2: Price-based (pre-flag) ────────────────────────────
+                # Gamma sets active=False/closed=True slowly. Use window_close_ts
+                # to gate this check instead — only after the window has expired.
+                now = time.time()
                 active = market.get("active", True)
                 closed = market.get("closed", False)
-                if not active or closed:
-                    # Shape A: tokens list with price field
-                    for token in tokens:
-                        price = float(token.get("price") or 0)
-                        if price >= 0.99:
-                            outcome = (token.get("outcome") or "").upper()
-                            direction = "UP" if "UP" in outcome or outcome == "YES" else "DOWN"
-                            log.debug("Resolution via token price: %s → %s", slug, direction)
-                            return WindowResult(
-                                slug=slug,
-                                direction=direction,
-                                resolved_at=time.time(),
-                            )
+                window_expired = (
+                    (window_close_ts > 0 and now >= window_close_ts + self._PRICE_RESOLVE_GRACE)
+                    or not active
+                    or closed
+                )
+                if not window_expired:
+                    log.debug("Resolution skip (window not yet closed): %s "
+                              "active=%s closed=%s window_close_ts=%.0f",
+                              slug, active, closed, window_close_ts)
+                    return None
 
-                    # Shape B: outcomePrices / outcomes / clobTokenIds (all JSON strings)
-                    raw_prices = market.get("outcomePrices")
-                    raw_outcomes = market.get("outcomes")
-                    if raw_prices and raw_outcomes:
-                        if isinstance(raw_prices, str):
-                            raw_prices = json.loads(raw_prices)
-                        if isinstance(raw_outcomes, str):
-                            raw_outcomes = json.loads(raw_outcomes)
-                        for outcome_label, price_str in zip(raw_outcomes, raw_prices):
-                            if float(price_str) >= 0.99:
-                                outcome = str(outcome_label).upper()
-                                direction = "UP" if "UP" in outcome or outcome == "YES" else "DOWN"
-                                log.debug("Resolution via outcomePrices: %s → %s", slug, direction)
-                                return WindowResult(
-                                    slug=slug,
-                                    direction=direction,
-                                    resolved_at=time.time(),
-                                )
-        except Exception:
-            pass
+                # Shape A: tokens list with price field
+                for token in tokens:
+                    price = float(token.get("price") or 0)
+                    if price >= 0.99:
+                        outcome = (token.get("outcome") or "").upper()
+                        direction = "UP" if "UP" in outcome or outcome == "YES" else "DOWN"
+                        log.info("Resolution (token price ≥0.99): %s → %s", slug, direction)
+                        return WindowResult(slug=slug, direction=direction,
+                                            resolved_at=time.time())
+
+                # Shape B: outcomePrices / outcomes (JSON strings)
+                raw_prices = market.get("outcomePrices")
+                raw_outcomes = market.get("outcomes")
+                if raw_prices and raw_outcomes:
+                    if isinstance(raw_prices, str):
+                        raw_prices = json.loads(raw_prices)
+                    if isinstance(raw_outcomes, str):
+                        raw_outcomes = json.loads(raw_outcomes)
+                    for outcome_label, price_str in zip(raw_outcomes, raw_prices):
+                        if float(price_str) >= 0.99:
+                            outcome = str(outcome_label).upper()
+                            direction = "UP" if "UP" in outcome or outcome == "YES" else "DOWN"
+                            log.info("Resolution (outcomePrices ≥0.99): %s → %s", slug, direction)
+                            return WindowResult(slug=slug, direction=direction,
+                                                resolved_at=time.time())
+
+                log.debug("Resolution: %s window expired but no settled price yet "
+                          "(active=%s closed=%s)", slug, active, closed)
+        except Exception as e:
+            log.debug("Resolution fetch error for %s: %s", slug, e)
         return None
 
     def _settle_window(self, slug: str, result: WindowResult):

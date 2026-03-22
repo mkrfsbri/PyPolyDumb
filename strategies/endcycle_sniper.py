@@ -129,6 +129,8 @@ class EndCycleSniper(BaseStrategy):
                 score += 3.0
             else:
                 score += 1.0  # opposing signal
+        else:
+            score += 1.5  # feed not warmed up — neutral
 
         # 3. RSI (2 pts)
         if state.rsi > 0:
@@ -171,5 +173,7 @@ class EndCycleSniper(BaseStrategy):
                 score += 1.0
             else:
                 score += 0.0
+        else:
+            score += 0.5  # BB feed not warmed up — neutral
 
         return score
