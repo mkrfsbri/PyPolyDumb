@@ -39,7 +39,7 @@ STARTING_BANKROLL: float = float(os.getenv("STARTING_BANKROLL", "100.0"))
 MAX_BET_FRACTION: float = float(os.getenv("MAX_BET_FRACTION", "0.10"))
 MAX_DAILY_LOSS_FRACTION: float = float(os.getenv("MAX_DAILY_LOSS_FRACTION", "0.20"))
 MIN_BANKROLL: float = float(os.getenv("MIN_BANKROLL", "20.0"))
-MAX_CONCURRENT_POSITIONS: int = 3
+MAX_CONCURRENT_POSITIONS: int = 4   # pair(1+2) + leg3 + endcycle_sniper = 4 max
 CIRCUIT_BREAK_LOSSES: int = 3       # consecutive losses before pause
 CIRCUIT_BREAK_DAILY_LOSS: float = 0.15  # daily loss fraction before pause
 COOLDOWN_SECONDS: int = 900          # 15 min cooldown after circuit break
@@ -53,6 +53,7 @@ ENDCYCLE_DEACTIVATE_SECS: int = 10  # stop at T-10s
 PAIR_COST_MAX: float = 0.97         # max combined (up+down) cost to enter
 PAIR_LEG3_THRESHOLD: float = 0.85  # token price min to trigger Leg 3 momentum bet
 PAIR_LEG3_ACTIVATION: int = 15     # seconds remaining to activate Leg 3
+MAX_SHARES_PER_LEG: int = 10       # fixed shares per leg (pair_cost_avg + endcycle_sniper)
 
 LATENCY_MIN_EDGE: float = 0.08      # minimum spot-vs-market edge
 LATENCY_CANCEL_SECS: int = 15       # cancel unfilled order after 15s

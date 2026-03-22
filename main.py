@@ -234,11 +234,14 @@ class BotOrchestrator:
             size_multiplier=self.guard.size_multiplier,
         )
 
-        # Fixed-size strategies bypass Kelly (Kelly requires win_prob > entry_price
-        # which the confidence scores for these strategies don't represent).
-        # Apply overrides BEFORE the size <= 0 guard so they aren't skipped.
+        # Fixed-share strategies bypass Kelly.
+        # size = MAX_SHARES_PER_LEG × price  (e.g. 10 shares × $0.40 = $4.00 cost)
+        # Apply BEFORE the size <= 0 guard so they aren't skipped.
         if strategy.NAME in ("pair_cost_avg", "endcycle_sniper"):
-            size = min(5.0, self.bankroll.available)
+            size = min(
+                config.MAX_SHARES_PER_LEG * signal.suggested_price,
+                self.bankroll.available,
+            )
         elif size <= 0:
             log.debug("Zero size for %s — skipping", strategy.NAME)
             return
