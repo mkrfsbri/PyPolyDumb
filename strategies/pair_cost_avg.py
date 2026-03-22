@@ -133,18 +133,26 @@ class PairCostAvg(BaseStrategy):
     def should_trade(self, signal: Signal, state: MarketState) -> bool:
         return signal.is_actionable()
 
+    def record_order_placed(self, slug: str, direction: str):
+        """Called immediately on order placement to block duplicate orders before fill."""
+        pair = self._get_state(slug)
+        if direction == "UP":
+            pair.legs_up += 1
+        else:
+            pair.legs_down += 1
+        log.debug("PairCostAvg order placed: %s %s legs_up=%d legs_down=%d",
+                  direction, slug, pair.legs_up, pair.legs_down)
+
     def record_fill(self, slug: str, direction: str, price: float, size_usdc: float):
-        """Called when an order fills."""
+        """Called when an order fills — updates qty/spend. legs already counted at placement."""
         pair = self._get_state(slug)
         shares = size_usdc / price
         if direction == "UP":
             pair.spent_up += size_usdc
             pair.qty_up += shares
-            pair.legs_up += 1
         else:
             pair.spent_down += size_usdc
             pair.qty_down += shares
-            pair.legs_down += 1
 
         cost = pair.pair_cost()
         profit = pair.potential_profit()

@@ -305,9 +305,10 @@ class BotOrchestrator:
                                  signal.suggested_price, size, token_id)
         elif hasattr(strategy, "record_trade"):
             strategy.record_trade(market.slug)
-        elif strategy.NAME == "pair_cost_avg" and hasattr(strategy, "record_fill"):
-            # Will be called when filled
-            pass
+        elif strategy.NAME == "pair_cost_avg" and hasattr(strategy, "record_order_placed"):
+            # Immediately count the leg so the next eval cycle doesn't place a duplicate.
+            # record_fill() updates qty/spend when the order actually fills.
+            strategy.record_order_placed(market.slug, signal.direction)
 
         # Dashboard broadcast
         try:
