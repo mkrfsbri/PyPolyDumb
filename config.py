@@ -51,6 +51,8 @@ ENDCYCLE_ACTIVATION_SECS: int = 30  # activate T-30s before window end
 ENDCYCLE_DEACTIVATE_SECS: int = 10  # stop at T-10s
 
 PAIR_COST_MAX: float = 0.97         # max combined (up+down) cost to enter
+PAIR_LEG3_THRESHOLD: float = 0.85  # token price min to trigger Leg 3 momentum bet
+PAIR_LEG3_ACTIVATION: int = 15     # seconds remaining to activate Leg 3
 
 LATENCY_MIN_EDGE: float = 0.08      # minimum spot-vs-market edge
 LATENCY_CANCEL_SECS: int = 15       # cancel unfilled order after 15s
