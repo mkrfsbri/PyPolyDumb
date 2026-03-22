@@ -453,6 +453,7 @@ class BotOrchestrator:
     def _cancel_secs(strategy_name: str) -> Optional[float]:
         """Order auto-cancel timeout per strategy."""
         cancel_map = {
+            "pair_cost_avg": 120.0,   # Leg 1 at mid needs up to 2 min; Leg 2/3 at ask fill fast
             "endcycle_sniper": 20.0,
             "latency_arb": config.LATENCY_CANCEL_SECS,
             "flash_crash": 30.0,

@@ -45,6 +45,8 @@ class OrderbookFeed:
     _MIN_CRASH_PRICE = 0.15
     # Minimum seconds between repeated alerts for the same token.
     _ALERT_COOLDOWN = 120.0
+    # Metrics older than this are considered stale (e.g. after WS reconnect).
+    _STALE_SECS = 30.0
 
     def __init__(self, ws_manager: PolymarketWebSocket, crash_window_secs: float = 10.0):
         self._ws = ws_manager
@@ -67,7 +69,10 @@ class OrderbookFeed:
         self._crash_callbacks.append(callback)
 
     def get_metrics(self, token_id: str) -> Optional[OrderbookMetrics]:
-        return self._metrics.get(token_id)
+        m = self._metrics.get(token_id)
+        if m and time.time() - m.timestamp > self._STALE_SECS:
+            return None   # books were cleared after WS disconnect; wait for fresh snapshot
+        return m
 
     def implied_prob(self, token_id: str) -> float:
         m = self._metrics.get(token_id)

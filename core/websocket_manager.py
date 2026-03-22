@@ -102,6 +102,13 @@ class PolymarketWebSocket:
         """Register callback: def callback(token_id: str, book: RealtimeBook)"""
         self._callbacks.append(callback)
 
+    def _clear_books(self):
+        """Clear all orderbook state on disconnect so stale prices aren't used."""
+        for book in self._books.values():
+            book.bids.clear()
+            book.asks.clear()
+        log.debug("Orderbooks cleared after WS disconnect")
+
     @property
     def is_connected(self) -> bool:
         return self._connected
@@ -126,11 +133,13 @@ class PolymarketWebSocket:
 
             except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
                 self._connected = False
+                self._clear_books()
                 log.warning("Polymarket WS disconnected: %s — reconnecting in %ds", e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
             except Exception as e:
                 self._connected = False
+                self._clear_books()
                 log.error("Polymarket WS error: %s — reconnecting in %ds", e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)

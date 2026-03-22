@@ -126,21 +126,26 @@ class PairCostAvg(BaseStrategy):
                 return Signal(
                     reason=f"Pair cost {combined:.3f} ≥ {MAX_PAIR_COST} — tidak ada edge"
                 )
+            # Leg 1 uses mid price (not ask) to improve pair_cost by ~1-2 cents.
+            # A mid-price limit order fills slower but the window gives plenty of time.
+            # Leg 2 uses ask to complete the hedge quickly once Leg 1 is confirmed.
+            up_mid = state.up_price
+            down_mid = state.down_price
             if up_ask <= down_ask:
                 return Signal(
                     direction="UP",
                     confidence=0.97,
-                    suggested_price=up_ask,
+                    suggested_price=up_mid,
                     suggested_size=0.0,
-                    reason=f"Leg 1 UP @ {up_ask:.3f} | combined={combined:.3f}",
+                    reason=f"Leg 1 UP @ {up_mid:.3f} (mid) | ask_combined={combined:.3f}",
                 )
             else:
                 return Signal(
                     direction="DOWN",
                     confidence=0.97,
-                    suggested_price=down_ask,
+                    suggested_price=down_mid,
                     suggested_size=0.0,
-                    reason=f"Leg 1 DOWN @ {down_ask:.3f} | combined={combined:.3f}",
+                    reason=f"Leg 1 DOWN @ {down_mid:.3f} (mid) | ask_combined={combined:.3f}",
                 )
 
         # ── Leg 2: Satu sisi sudah dipasang — lengkapi pair ───────────────────
