@@ -158,7 +158,8 @@ class PolymarketClient:
             side=side,
             fee_rate_bps=fee_rate_bps,
         )
-        options = PartialCreateOrderOptions(neg_risk=False)
+        neg_risk = self._client.get_neg_risk(token_id)
+        options = PartialCreateOrderOptions(neg_risk=neg_risk)
 
         for attempt, delay in enumerate([0, 2, 4, 8]):
             if delay:
