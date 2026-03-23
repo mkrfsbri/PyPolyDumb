@@ -212,5 +212,99 @@ else:
     finally:
         httpx.post = _orig_post
 
+# ── Bagian 4: API secret encoding / padding check ────────────────────────
+print()
+print("── Bagian 4: API secret encoding / padding check ────────────────")
+
+if not ASEC:
+    print("  POLY_API_SECRET tidak ada — skip.")
+else:
+    import base64 as _b64
+    import binascii as _binascii
+    import hmac as _hmaclib
+    import hashlib as _hashlib
+
+    # ── 4a. Padding ───────────────────────────────────────────────────
+    # Python's urlsafe_b64decode does NOT auto-add padding; it raises
+    # binascii.Error: Incorrect padding if len(secret) % 4 != 0.
+    pad_needed = (4 - len(ASEC) % 4) % 4
+    padded     = ASEC + "=" * pad_needed
+    print(f"  Secret length   : {len(ASEC)} chars  (pad needed: {pad_needed})")
+
+    try:
+        decoded_url = _b64.urlsafe_b64decode(padded)
+        print(f"  urlsafe_b64decode: OK → {len(decoded_url)} bytes")
+    except _binascii.Error as e:
+        print(f"  urlsafe_b64decode: FAIL → {e}  (secret may not be base64url)")
+        decoded_url = None
+
+    # ── 4b. Standard vs URL-safe charset ─────────────────────────────
+    # If the secret contains '+' or '/' it was encoded with standard base64,
+    # not URL-safe.  urlsafe_b64decode will misinterpret those bytes.
+    has_std_chars = any(c in ASEC for c in ("+", "/"))
+    has_url_chars = any(c in ASEC for c in ("-", "_"))
+    if has_std_chars:
+        print(f"  WARNING: secret contains '+' or '/' — standard base64 charset!")
+        print(f"           urlsafe_b64decode will decode these INCORRECTLY.")
+        print(f"           The HMAC key will be WRONG → server rejects sig.")
+        try:
+            decoded_std = _b64.b64decode(padded)
+            print(f"  Standard b64decode: OK → {len(decoded_std)} bytes")
+            if decoded_url and decoded_url != decoded_std:
+                print(f"  Keys differ: urlsafe vs standard → {len(decoded_url)}B vs {len(decoded_std)}B")
+        except Exception as e2:
+            print(f"  Standard b64decode: FAIL → {e2}")
+    else:
+        print(f"  Charset OK: no '+' or '/' found ({'has -/_ chars' if has_url_chars else 'alphanumeric only'})")
+
+    # ── 4c. HMAC round-trip: does the library produce a valid sig? ────
+    # Replicate exactly what build_hmac_signature does, then cross-check.
+    if decoded_url is not None:
+        import time as _time
+        ts       = int(_time.time())
+        method   = "POST"
+        path     = "/order"
+        test_body = '{"order":{"salt":"1","maker":"0x0","signer":"0x0","taker":"0x0",' \
+                    '"tokenId":"0","makerAmount":"0","takerAmount":"0","expiration":"0",' \
+                    '"nonce":"0","feeRateBps":"0","side":"BUY","signatureType":1},' \
+                    '"owner":"test","orderType":"GTC","postOnly":false}'
+
+        # Library path: urlsafe_b64decode WITHOUT padding fix
+        try:
+            key_lib  = _b64.urlsafe_b64decode(ASEC)   # ← exactly what the library does
+            msg      = str(ts) + method + path + test_body
+            sig_lib  = _b64.urlsafe_b64encode(
+                _hmaclib.new(key_lib, msg.encode("utf-8"), _hashlib.sha256).digest()
+            ).decode()
+            print(f"  Library HMAC (no padding fix): {sig_lib[:24]}...")
+        except _binascii.Error as e:
+            print(f"  Library HMAC ERROR (no padding): {e}")
+            print(f"  → This means every POST /order HMAC is throwing an exception!")
+
+        # Corrected path: urlsafe_b64decode WITH padding
+        try:
+            key_fix  = _b64.urlsafe_b64decode(padded)
+            msg      = str(ts) + method + path + test_body
+            sig_fix  = _b64.urlsafe_b64encode(
+                _hmaclib.new(key_fix, msg.encode("utf-8"), _hashlib.sha256).digest()
+            ).decode()
+            print(f"  Fixed HMAC  (with padding):    {sig_fix[:24]}...")
+        except Exception as e:
+            print(f"  Fixed HMAC error: {e}")
+
+    # ── 4d. Summary ──────────────────────────────────────────────────
+    print()
+    if pad_needed > 0:
+        print(f"  !! Secret is missing {pad_needed} padding char(s). "
+              f"py_clob_client calls urlsafe_b64decode(secret) WITHOUT")
+        print(f"     adding padding first.  If Python raises Incorrect padding,")
+        print(f"     the exception propagates and order POST never reaches the server.")
+    elif has_std_chars:
+        print(f"  !! Standard-base64 chars in secret — HMAC key is wrong!")
+    else:
+        print(f"  API secret encoding looks correct for urlsafe_b64decode.")
+        print(f"  The 400 error is NOT caused by HMAC secret encoding.")
+        print(f"  Root cause is the EIP-712 order signature (neg_risk / domain).")
+
 print()
 print("=" * 65)
