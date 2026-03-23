@@ -106,8 +106,9 @@ SIDE     = "BUY"
 def _check_orderbook(token_id: str) -> bool:
     try:
         import httpx
+        # CLOB order book endpoint is /book, not /orderbook
         r = httpx.get(
-            f"https://clob.polymarket.com/orderbook",
+            "https://clob.polymarket.com/book",
             params={"token_id": token_id},
             timeout=8,
         )
@@ -215,25 +216,14 @@ try:
 except ImportError:
     print("  web3 not installed — run: pip install web3")
 
-# ── Bagian 3: intercept POST body ────────────────────────────────────────
+# ── Bagian 3: dump order fields + submit (live POST) ─────────────────────
 print()
-print("── Bagian 3: intercept POST body (tidak dikirim) ────────────────")
+print("── Bagian 3: order fields + live POST ───────────────────────────")
 
 if not all([AKEY, ASEC, APASS]):
     print("  API creds tidak lengkap — skip.")
 else:
     try:
-        import py_clob_client.http_helpers.helpers as _http_helpers
-        _orig_http_post = _http_helpers.post
-        _captured_body  = {}
-
-        def _intercept_post(url, headers=None, data=None, **kwargs):
-            _captured_body["url"]  = url
-            _captured_body["data"] = data or ""
-            raise RuntimeError("__INTERCEPTED__")
-
-        _http_helpers.post = _intercept_post
-
         creds = ApiCreds(api_key=AKEY, api_secret=ASEC, api_passphrase=APASS)
         client_l2 = ClobClient(
             host="https://clob.polymarket.com",
@@ -243,9 +233,11 @@ else:
             signature_type=SIG_T,
             funder=FUND,
         )
-        # Use _MARKET_NEG_RISK from the bot's own market discovery
+        # Use CLOB get_neg_risk() — same as the main bot in polymarket_client.py.
+        # For BTC up/down markets CLOB returns False (Normal exchange).
+        # Gamma returns True (NegRisk exchange) but that causes "invalid signature".
         tick_size = client_l2.get_tick_size(TOKEN_ID)
-        neg_risk  = _MARKET_NEG_RISK   # use Gamma-derived neg_risk, not CLOB API
+        neg_risk  = client_l2.get_neg_risk(TOKEN_ID)
         order_args = OrderArgs(
             token_id=TOKEN_ID,
             price=PRICE,
@@ -255,36 +247,32 @@ else:
         )
         options = CreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk)
         signed2 = client_l2.builder.create_order(order_args, options)
-        client_l2.post_order(signed2, OrderType.GTC)
 
-    except RuntimeError as e:
-        if "__INTERCEPTED__" in str(e):
-            body_str = _captured_body.get("data", "")
-            try:
-                body_obj  = json.loads(body_str)
-                ord_body  = body_obj.get("order", {})
-                print(f"  owner         : {body_obj.get('owner')}")
-                print(f"  maker         : {ord_body.get('maker')}")
-                print(f"  signer        : {ord_body.get('signer')}")
-                print(f"  tokenId[:20]  : {str(ord_body.get('tokenId',''))[:20]}...")
-                print(f"  signatureType : {ord_body.get('signatureType')}")
-                print(f"  feeRateBps    : {ord_body.get('feeRateBps')}")
-                print(f"  makerAmount   : {ord_body.get('makerAmount')}")
-                print(f"  takerAmount   : {ord_body.get('takerAmount')}")
-                print(f"  side          : {ord_body.get('side')}")
-                print(f"  neg_risk used : {neg_risk}")
-                sig_b = ord_body.get("signature", "")
-                print(f"  sig[:22]      : {sig_b[:22]}...")
-                print()
-                print(f"  ✓ POST body captured — order NOT sent to server")
-            except Exception:
-                print(f"  Raw body: {body_str[:400]}")
-        else:
-            print(f"  ERROR: {e}")
+        # Print all order fields BEFORE submitting so they're visible regardless
+        # of what the server returns.
+        from py_clob_client.utilities import order_to_json
+        body = order_to_json(signed2, AKEY, "GTC", False)
+        od   = body.get("order", {})
+        print(f"  [order fields]")
+        print(f"  owner         : {body.get('owner')}")
+        print(f"  maker         : {od.get('maker')}")
+        print(f"  signer        : {od.get('signer')}")
+        print(f"  tokenId[:20]  : {str(od.get('tokenId',''))[:20]}...")
+        print(f"  signatureType : {od.get('signatureType')}")
+        print(f"  feeRateBps    : {od.get('feeRateBps')}")
+        print(f"  makerAmount   : {od.get('makerAmount')}")
+        print(f"  takerAmount   : {od.get('takerAmount')}")
+        print(f"  side          : {od.get('side')}")
+        print(f"  tick_size     : {tick_size}")
+        print(f"  neg_risk      : {neg_risk}  (CLOB API)  vs  {_MARKET_NEG_RISK}  (Gamma)")
+        print(f"  sig[:22]      : {od.get('signature','')[:22]}...")
+        print()
+
+        # Now actually POST
+        resp = client_l2.post_order(signed2, OrderType.GTC)
+        print(f"  ✓ POST /order → {resp}")
     except Exception as e:
-        print(f"  ERROR: {e}")
-    finally:
-        _http_helpers.post = _orig_http_post
+        print(f"  POST /order → {e}")
 
 # ── Bagian 4: API secret encoding / padding check ────────────────────────
 print()
