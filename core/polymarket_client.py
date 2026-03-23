@@ -165,6 +165,14 @@ class PolymarketClient:
                 await asyncio.sleep(delay)
             try:
                 order = self._client.create_order(order_args, options)
+                od = order.dict()
+                log.debug(
+                    "Signed order: maker=%s signer=%s sigType=%s feeRate=%s "
+                    "makerAmt=%s takerAmt=%s neg_risk=%s",
+                    od.get("maker"), od.get("signer"), od.get("signatureType"),
+                    od.get("feeRateBps"), od.get("makerAmount"), od.get("takerAmount"),
+                    self._client.get_neg_risk(token_id),
+                )
                 resp = self._client.post_order(order, OrderType.GTC)
                 order_id = resp.get("orderID", "") or resp.get("id", "")
                 log.info("Placed maker order %s: %s %s @ %.4f (%.2f shares)",

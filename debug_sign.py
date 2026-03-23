@@ -1,11 +1,12 @@
 """
-Diagnostik signing order secara lokal.
+Diagnostik signing order — menggunakan alur ClobClient yang sama persis dengan bot.
 Jalankan: python debug_sign.py
 
-Script ini TIDAK mengirim order ke API — hanya memverifikasi bahwa
-EIP-712 signature yang dibuat lokal valid (signer bisa di-recover).
+Bagian 1 : verifikasi lokal (tidak POST ke API)
+Bagian 2 : intercept POST body untuk melihat persis apa yang dikirim
 """
 
+import json
 import os
 from dotenv import load_dotenv
 
@@ -14,116 +15,169 @@ load_dotenv()
 KEY   = os.getenv("POLY_PRIVATE_KEY", "")
 FUND  = os.getenv("POLY_FUNDER_ADDRESS", "")
 AKEY  = os.getenv("POLY_API_KEY", "")
+ASEC  = os.getenv("POLY_API_SECRET", "")
+APASS = os.getenv("POLY_API_PASSPHRASE", "")
 SIG_T = int(os.getenv("POLY_SIGNATURE_TYPE", "1"))
 
 if not KEY or not FUND:
     raise SystemExit("ERROR: POLY_PRIVATE_KEY / POLY_FUNDER_ADDRESS belum diisi di .env")
 
 from eth_account import Account
-from eth_utils import keccak, to_checksum_address
+from eth_utils import to_checksum_address
 
-from py_clob_client.config import get_contract_config
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType, PartialCreateOrderOptions
+from py_order_utils.builders.order_builder import OrderBuilder as UtilsOrderBuilder
+from py_order_utils.signer import Signer as UtilsSigner
 
-# ── 1. Verifikasi dasar ────────────────────────────────────────────────────
-eoa = Account.from_key(KEY).address
+# Token dari log yang gagal terakhir
+TOKEN_ID = "38112870951064265909502943213812026902920948580072601239040959889927748868 62".replace(" ", "")
+PRICE    = 0.50   # harga dummy
+SIZE     = 5.0    # shares (minimum Polymarket)
+SIDE     = "BUY"
+
+eoa     = Account.from_key(KEY).address
 fund_cs = to_checksum_address(FUND)
 
-print("=" * 60)
-print("DIAGNOSTIK ORDER SIGNING")
-print("=" * 60)
-print(f"  EOA (dari private key)  : {eoa}")
-print(f"  Funder (POLY_FUNDER_ADDRESS) : {fund_cs}")
-print(f"  Signature type          : {SIG_T}")
-print(f"  API Key prefix          : {AKEY[:8]}..." if AKEY else "  API Key: NOT SET")
+print("=" * 65)
+print("DIAGNOSTIK ORDER SIGNING — REAL ClobClient FLOW")
+print("=" * 65)
+print(f"  EOA   : {eoa}")
+print(f"  Funder: {fund_cs}")
+print(f"  SigType: {SIG_T}")
+print(f"  EOA == Funder: {eoa.lower() == fund_cs.lower()} (harus False untuk sig_type=1)")
 print()
 
-if SIG_T == 1:
-    if eoa.lower() == fund_cs.lower():
-        print("⚠️  MASALAH: EOA == Funder!")
-        print("   Untuk sig_type=1 (proxy), POLY_FUNDER_ADDRESS harus berisi")
-        print("   alamat PROXY CONTRACT dari polymarket.com/profile, BUKAN EOA.")
-    else:
-        print("✓  EOA != Funder (benar untuk sig_type=1)")
-elif SIG_T == 0:
-    if eoa.lower() != fund_cs.lower():
-        print("⚠️  MASALAH: Untuk sig_type=0 (EOA), POLY_FUNDER_ADDRESS harus")
-        print("   sama dengan EOA address (derived dari POLY_PRIVATE_KEY).")
-    else:
-        print("✓  EOA == Funder (benar untuk sig_type=0)")
+# ── Level 1: hanya butuh key+funder, tidak perlu API creds ───────────────
+client_l1 = ClobClient(
+    host="https://clob.polymarket.com",
+    chain_id=137,
+    key=KEY,
+    signature_type=SIG_T,
+    funder=FUND,
+)
 
-# ── 2. Buat order dummy dan verifikasi signature lokal ─────────────────────
+print(f"Token  : {TOKEN_ID[:20]}...")
+print(f"Side   : {SIDE}  Price: {PRICE}  Size: {SIZE} shares")
 print()
-print("Membuat order dummy untuk verifikasi signing...")
 
-# Token BTC YES 5m (dummy — tidak dikirim ke API)
-DUMMY_TOKEN = "20237547420640173970854278910041369523140337546333913520867861759044515484018"
-
-from py_clob_client.signer import Signer as ClobSigner
-from py_order_utils.signer import Signer as UtilsSigner
-from py_order_utils.builders.order_builder import OrderBuilder as UtilsOrderBuilder
-from py_order_utils.model.order import OrderData
-from py_order_utils.model.sides import BUY
-
-# Ambil contract config (neg_risk=True untuk market BTC binary)
-for neg_risk_val in [False, True]:
-    cfg = get_contract_config(137, neg_risk_val)
-    label = "NEG_RISK" if neg_risk_val else "NORMAL"
-
-    signer = UtilsSigner(key=KEY)
-
-    maker = to_checksum_address(FUND)
-    sig_signer = signer.address()
-
-    data = OrderData(
-        maker=maker,
-        taker="0x0000000000000000000000000000000000000000",
-        tokenId=DUMMY_TOKEN,
-        makerAmount="1000000",   # 1 USDC.e (6 decimals)
-        takerAmount="2000000",
-        side=BUY,               # integer 0, bukan string "0"
-        feeRateBps="0",
-        nonce="0",
-        signer=sig_signer,
-        expiration="0",
-        signatureType=SIG_T,
+# ── Bagian 1: create_order (tanpa POST) ──────────────────────────────────
+print("── Bagian 1: create_order lokal ─────────────────────────────────")
+try:
+    order_args = OrderArgs(
+        token_id=TOKEN_ID,
+        price=PRICE,
+        size=SIZE,
+        side=SIDE,
+        fee_rate_bps=0,
     )
+    options = PartialCreateOrderOptions(neg_risk=False)
+    signed = client_l1.create_order(order_args, options)
+    od = signed.dict()
 
-    builder = UtilsOrderBuilder(
-        cfg.exchange,
-        137,
-        signer,
-    )
+    print(f"  maker          : {od['maker']}")
+    print(f"  signer         : {od['signer']}")
+    print(f"  tokenId        : {od['tokenId'][:20]}...")
+    print(f"  makerAmount    : {od['makerAmount']}")
+    print(f"  takerAmount    : {od['takerAmount']}")
+    print(f"  feeRateBps     : {od['feeRateBps']}")
+    print(f"  side           : {od['side']}")
+    print(f"  signatureType  : {od['signatureType']}")
+    print(f"  nonce          : {od['nonce']}")
+    print(f"  expiration     : {od['expiration']}")
+    print(f"  signature[:20] : {od['signature'][:22]}...")
+    print()
+
+    # Verifikasi recover signer lokal
+    neg_risk = client_l1.get_neg_risk(TOKEN_ID)
+    from py_clob_client.config import get_contract_config
+    cfg = get_contract_config(137, neg_risk)
+    print(f"  neg_risk       : {neg_risk}  → exchange: {cfg.exchange}")
+
+    utils_signer = UtilsSigner(key=KEY)
+    tmp_builder  = UtilsOrderBuilder(cfg.exchange, 137, utils_signer)
+    struct_hash  = tmp_builder._create_struct_hash(signed.order)
+    recovered    = Account._recover_hash(struct_hash,
+                       signature=bytes.fromhex(od["signature"][2:]))
+
+    sig_ok = recovered.lower() == eoa.lower()
+    print(f"  Recovered EOA  : {recovered}")
+    print(f"  Signature valid: {'✓ OK' if sig_ok else '✗ MISMATCH!'}")
+
+except Exception as e:
+    print(f"  ERROR saat create_order: {e}")
+    import traceback; traceback.print_exc()
+
+# ── Bagian 2: intercept POST body ────────────────────────────────────────
+print()
+print("── Bagian 2: intercept POST body (tidak benar-benar dikirim) ────")
+
+if not all([AKEY, ASEC, APASS]):
+    print("  API creds tidak lengkap — skip intercept.")
+else:
+    import httpx
+
+    _orig_post = httpx.post
+
+    captured = {}
+
+    def _fake_post(url, **kwargs):
+        captured["url"]  = url
+        captured["body"] = kwargs.get("data") or kwargs.get("content") or ""
+        captured["hdrs"] = {k: v for k, v in (kwargs.get("headers") or {}).items()
+                            if k.lower() in ("poly-address", "poly-signature",
+                                             "poly-timestamp", "poly-nonce",
+                                             "content-type")}
+        raise RuntimeError("__INTERCEPTED__")
+
+    httpx.post = _fake_post
 
     try:
-        signed = builder.build_signed_order(data)
-        order_dict = signed.dict()
-        sig = order_dict["signature"]
-
-        # Recover signer dari signature
-        struct_hash = builder._create_struct_hash(signed.order)
-        recovered = Account._recover_hash(struct_hash, signature=bytes.fromhex(sig[2:]))
-
-        sig_ok = recovered.lower() == eoa.lower()
-        print(f"\n  [{label}] Exchange: {cfg.exchange}")
-        print(f"    maker (funder)  : {order_dict['maker']}")
-        print(f"    signer (EOA)    : {order_dict['signer']}")
-        print(f"    signatureType   : {order_dict['signatureType']}")
-        print(f"    signature[:16]  : {sig[:18]}...")
-        print(f"    Recovered signer: {recovered}")
-        print(f"    Signature valid : {'✓ OK' if sig_ok else '✗ MISMATCH — private key tidak sesuai!'}")
-        if not sig_ok:
-            print(f"    Expected EOA    : {eoa}")
-
+        creds = ApiCreds(api_key=AKEY, api_secret=ASEC, api_passphrase=APASS)
+        client_l2 = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=KEY,
+            creds=creds,
+            signature_type=SIG_T,
+            funder=FUND,
+        )
+        order_args2 = OrderArgs(
+            token_id=TOKEN_ID,
+            price=PRICE,
+            size=SIZE,
+            side=SIDE,
+            fee_rate_bps=0,
+        )
+        signed2  = client_l2.create_order(order_args2, PartialCreateOrderOptions(neg_risk=False))
+        client_l2.post_order(signed2, OrderType.GTC)
+    except RuntimeError as e:
+        if "__INTERCEPTED__" in str(e):
+            print(f"  URL  : {captured.get('url')}")
+            print(f"  Headers: {json.dumps(captured.get('hdrs', {}), indent=4)}")
+            body_str = captured.get("body", "")
+            try:
+                body_obj = json.loads(body_str)
+                ord_body = body_obj.get("order", {})
+                print(f"  Body.owner          : {body_obj.get('owner')}")
+                print(f"  Body.orderType      : {body_obj.get('orderType')}")
+                print(f"  Body.order.maker    : {ord_body.get('maker')}")
+                print(f"  Body.order.signer   : {ord_body.get('signer')}")
+                print(f"  Body.order.sig_type : {ord_body.get('signatureType')}")
+                print(f"  Body.order.feeRate  : {ord_body.get('feeRateBps')}")
+                print(f"  Body.order.maker_amt: {ord_body.get('makerAmount')}")
+                print(f"  Body.order.taker_amt: {ord_body.get('takerAmount')}")
+                sig_b = ord_body.get("signature", "")
+                print(f"  Body.order.sig[:20] : {sig_b[:22]}...")
+            except Exception:
+                print(f"  Raw body: {body_str[:500]}")
+        else:
+            print(f"  ERROR: {e}")
     except Exception as e:
-        print(f"\n  [{label}] ERROR: {e}")
+        print(f"  ERROR (non-intercept): {e}")
+        import traceback; traceback.print_exc()
+    finally:
+        httpx.post = _orig_post
 
-# ── 3. Cek konsistensi API key ─────────────────────────────────────────────
 print()
-print("=" * 60)
-if AKEY:
-    print("Untuk memverifikasi API key cocok dengan proxy ini, jalankan:")
-    print("  python generate_creds.py")
-    print("Jika API Key berbeda dengan yang di .env, update .env!")
-else:
-    print("⚠️  POLY_API_KEY tidak diset — jalankan python generate_creds.py")
-print("=" * 60)
+print("=" * 65)
