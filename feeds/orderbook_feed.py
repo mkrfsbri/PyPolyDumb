@@ -40,6 +40,14 @@ class OrderbookFeed:
     Detects flash crashes by tracking mid-price history.
     """
 
+    # Minimum price for crash detection — tokens below this are near-expiry,
+    # not trading opportunities, and generate false positives at tiny prices.
+    _MIN_CRASH_PRICE = 0.15
+    # Minimum seconds between repeated alerts for the same token.
+    _ALERT_COOLDOWN = 120.0
+    # Metrics older than this are considered stale (e.g. after WS reconnect).
+    _STALE_SECS = 30.0
+
     def __init__(self, ws_manager: PolymarketWebSocket, crash_window_secs: float = 10.0):
         self._ws = ws_manager
         self._crash_window = crash_window_secs
@@ -47,6 +55,8 @@ class OrderbookFeed:
         # Price history per token: deque of (timestamp, mid_price)
         self._price_history: dict[str, deque] = {}
         self._crash_callbacks: list = []
+        # Last alert time per token to prevent flooding
+        self._last_crash_alert: dict[str, float] = {}
 
         # Register our update handler
         self._ws.on_update(self._on_book_update)
@@ -59,7 +69,10 @@ class OrderbookFeed:
         self._crash_callbacks.append(callback)
 
     def get_metrics(self, token_id: str) -> Optional[OrderbookMetrics]:
-        return self._metrics.get(token_id)
+        m = self._metrics.get(token_id)
+        if m and time.time() - m.timestamp > self._STALE_SECS:
+            return None   # books were cleared after WS disconnect; wait for fresh snapshot
+        return m
 
     def implied_prob(self, token_id: str) -> float:
         m = self._metrics.get(token_id)
@@ -107,11 +120,21 @@ class OrderbookFeed:
         self._check_flash_crash(token_id, mid)
 
     def _check_flash_crash(self, token_id: str, current_mid: float):
+        # Skip near-zero tokens — they're resolving toward 0, not crashing.
+        if current_mid < self._MIN_CRASH_PRICE:
+            return
+
         history = self._price_history.get(token_id)
         if not history or len(history) < 2:
             return
 
         now = time.time()
+
+        # Cooldown: suppress repeated alerts for the same token.
+        last = self._last_crash_alert.get(token_id, 0.0)
+        if now - last < self._ALERT_COOLDOWN:
+            return
+
         cutoff = now - self._crash_window
 
         # Find the highest price in the crash window
@@ -126,6 +149,7 @@ class OrderbookFeed:
         drop_pct = (peak - current_mid) / peak
 
         if drop_pct >= 0.25:  # 25% drop threshold
+            self._last_crash_alert[token_id] = now
             log.warning("FLASH CRASH detected: %s dropped %.1f%% in %.0fs",
                         token_id[:8], drop_pct * 100, self._crash_window)
             for cb in self._crash_callbacks:

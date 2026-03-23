@@ -148,6 +148,8 @@ class OrderManager:
                 await self._expire_orders()
                 if config.BOT_MODE == "live":
                     await self._poll_fills()
+                else:
+                    await self._simulate_fills()
             except Exception as e:
                 log.error("OrderManager error: %s", e)
             await asyncio.sleep(2)
@@ -162,6 +164,24 @@ class OrderManager:
         for oid in to_cancel:
             log.info("Auto-cancelling expired order %s", oid)
             await self.cancel_order_by_id(oid)
+
+    async def _simulate_fills(self):
+        """Dry-run mode: mark simulated orders as filled after a realistic delay."""
+        _FILL_DELAY = 2.0  # seconds — mimics typical maker fill latency
+        async with self._lock:
+            to_fill = [
+                o for o in self._orders.values()
+                if o.simulated and not o.filled and not o.cancelled
+                and o.age() >= _FILL_DELAY
+            ]
+            for order in to_fill:
+                order.filled = True
+
+        for order in to_fill:
+            log.info("Simulated fill: %s (strategy=%s size=$%.2f)",
+                     order.order_id, order.strategy, order.size)
+            for cb in self._fill_callbacks:
+                asyncio.create_task(cb(order))
 
     async def _poll_fills(self):
         """Check which tracked orders have been filled via API."""

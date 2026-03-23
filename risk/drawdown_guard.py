@@ -73,6 +73,11 @@ class DrawdownGuard:
         if self._consecutive_losses >= config.CIRCUIT_BREAK_LOSSES:
             self._trip_circuit(f"{self._consecutive_losses} consecutive losses")
 
+    def reset(self):
+        """Manually clear the circuit breaker and loss counter (e.g. after a misfire)."""
+        self._reset_circuit()
+        log.info("DrawdownGuard: manually reset")
+
     def check_daily_loss(self, daily_pnl: float):
         """Call this periodically with current daily P&L."""
         threshold = -(config.STARTING_BANKROLL * config.CIRCUIT_BREAK_DAILY_LOSS)

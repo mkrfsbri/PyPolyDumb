@@ -9,6 +9,7 @@ Deterministic slug construction:
 """
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -142,7 +143,7 @@ async def fetch_market(slug: str, session: aiohttp.ClientSession) -> Optional[Ma
                 return None
 
             # ── Parse close timestamp ─────────────────────────────────────────
-            close_ts = _parse_end_date(end_date)
+            close_ts = _parse_end_date(end_date, slug)
             open_ts = close_ts - config.WINDOW_INTERVAL
 
             log.debug("Parsed market %s | UP=%s DOWN=%s close_ts=%d",
@@ -170,22 +171,72 @@ async def fetch_market(slug: str, session: aiohttp.ClientSession) -> Optional[Ma
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _extract_all_tokens(market: dict) -> list:
-    """Return all token objects from a market dict (handles both flat and nested)."""
+    """Return all token objects from a market dict.
+
+    Handles three Gamma API shapes:
+      Shape A — tokens[]: [{tokenId/token_id, outcome, price}, ...]
+      Shape B — clobTokenIds[]: paired with outcomes[] and outcomePrices[]
+      Shape C — empty / missing tokens (caller will dig into sub-markets)
+    """
+    # Shape A: explicit tokens array with objects
     tokens = market.get("tokens") or []
-    if isinstance(tokens, list):
+    if isinstance(tokens, list) and tokens:
         return list(tokens)
+
+    # Shape B: clobTokenIds paired with outcomes / outcomePrices
+    # Gamma API returns these as JSON-encoded strings, not parsed lists
+    clob_ids = market.get("clobTokenIds") or []
+    outcomes = market.get("outcomes") or []
+    prices = market.get("outcomePrices") or []
+    if isinstance(clob_ids, str):
+        clob_ids = json.loads(clob_ids)
+    if isinstance(outcomes, str):
+        outcomes = json.loads(outcomes)
+    if isinstance(prices, str):
+        prices = json.loads(prices)
+    if isinstance(clob_ids, list) and clob_ids:
+        result = []
+        for i, tid in enumerate(clob_ids):
+            outcome = outcomes[i] if i < len(outcomes) else ""
+            price = prices[i] if i < len(prices) else "0.50"
+            result.append({"tokenId": tid, "outcome": outcome, "price": price})
+        return result
+
     return []
 
 
-def _parse_end_date(end_date: str) -> int:
-    """Parse ISO end date to unix timestamp; fallback to next window boundary."""
+def _parse_end_date(end_date: str, slug: str = "") -> int:
+    """Parse ISO end date to unix timestamp.
+
+    The Gamma API sometimes returns endDate as a bare date ("2026-03-21") with no
+    time component, which fromisoformat() parses to midnight UTC — far in the past
+    relative to intra-day 5-minute windows.  When that happens (seconds == 0), fall
+    back to deriving the close time from the slug, which encodes the exact window-open
+    timestamp as its trailing integer.  If the slug is unavailable, use the next
+    computed window boundary.
+    """
+    import datetime
     if end_date:
         try:
-            import datetime
             dt = datetime.datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-            return int(dt.timestamp())
+            ts = int(dt.timestamp())
+            # Date-only strings parse to midnight; treat as unusable
+            if dt.hour != 0 or dt.minute != 0 or dt.second != 0:
+                return ts
         except Exception:
             pass
+
+    # Try to extract close time from the slug (format: btc-updown-5m-<open_ts>)
+    if slug:
+        try:
+            parts = slug.rsplit("-", 1)
+            open_ts = int(parts[-1])
+            window_type = slug.split("-")[2]  # "5m" or "15m"
+            interval = config.WINDOW_SECONDS.get(window_type, config.WINDOW_INTERVAL)
+            return open_ts + interval
+        except Exception:
+            pass
+
     interval = config.WINDOW_INTERVAL
     now_ts = int(time.time())
     return now_ts - (now_ts % interval) + interval
@@ -198,9 +249,11 @@ async def get_current_market(window_type: str = "5m") -> Optional[MarketInfo]:
         for offset in (0, 1, -1):
             slug = build_slug(window_type, offset)
             market = await fetch_market(slug, session)
-            if market:
+            if market and market.is_active():
                 log.info("Found market: %s (%.0fs remaining)", slug, market.seconds_remaining())
                 return market
+            if market:
+                log.debug("Skipping expired market: %s", slug)
         log.error("Could not find any active BTC %s market", window_type)
         return None
 

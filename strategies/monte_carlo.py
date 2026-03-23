@@ -59,7 +59,7 @@ class MonteCarlo(BaseStrategy):
         # Run Monte Carlo
         p_up = self._run_simulation(
             current_price=state.btc_price,
-            window_open=state.market.up_price,  # Not ideal but workable
+            window_open=state.btc_open if state.btc_open > 0 else state.btc_price,
             time_remaining=state.seconds_remaining,
             vol=vol,
         )

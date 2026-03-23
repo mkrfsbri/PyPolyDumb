@@ -123,6 +123,14 @@ class BotOrchestrator:
         self._eval_interval = 1.0   # seconds between strategy evaluations
         self._running = False
         self._TradeRecord = TradeRecord
+        self._bg_tasks: set = set()  # keep strong references to background tasks
+
+    def _create_task(self, coro):
+        """Create a tracked background task (prevents GC before completion)."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     async def run(self):
         """Main bot loop."""
@@ -188,7 +196,7 @@ class BotOrchestrator:
         # Broadcast price update to dashboard
         try:
             from dashboard.server import broadcast_price
-            asyncio.create_task(broadcast_price(
+            self._create_task(broadcast_price(
                 state.btc_price, state.window_delta, state.seconds_remaining
             ))
         except Exception:
@@ -199,7 +207,10 @@ class BotOrchestrator:
                 continue
             try:
                 signal = await strategy.analyze(state)
-                if signal.is_actionable() and strategy.should_trade(signal, state):
+                if strategy.NAME == "market_maker":
+                    if strategy.should_trade(signal, state):
+                        await self._place_mm_quotes(strategy, signal, state)
+                elif signal.is_actionable() and strategy.should_trade(signal, state):
                     await self._place_trade(strategy, signal, state)
             except Exception as e:
                 log.error("Strategy %s error: %s", strategy.NAME, e)
@@ -223,32 +234,41 @@ class BotOrchestrator:
             size_multiplier=self.guard.size_multiplier,
         )
 
-        if size <= 0:
+        # Fixed-share strategies bypass Kelly.
+        # size = MAX_SHARES_PER_LEG × price  (e.g. 10 shares × $0.40 = $4.00 cost)
+        # Apply BEFORE the size <= 0 guard so they aren't skipped.
+        if strategy.NAME in ("pair_cost_avg", "endcycle_sniper"):
+            size = min(
+                config.MAX_SHARES_PER_LEG * signal.suggested_price,
+                self.bankroll.available,
+            )
+        elif size <= 0:
             log.debug("Zero size for %s — skipping", strategy.NAME)
             return
 
         # Risk limit check
-        ok, reason = self.risk.check(size, strategy.NAME)
+        ok, reason = self.risk.check(size, strategy.NAME, market.slug)
         if not ok:
             log.warning("Risk limit rejected %s trade: %s", strategy.NAME, reason)
             return
-
-        # For pair_cost_avg: fixed $5 per leg
-        if strategy.NAME == "pair_cost_avg":
-            size = min(5.0, self.bankroll.available)
 
         log.info("Placing %s %s order | strategy=%s price=%.3f size=$%.2f conf=%.2f",
                  signal.direction, market.slug, strategy.NAME,
                  signal.suggested_price, size, signal.confidence)
 
-        # Place order
+        # Place order — use per-signal TTL if set, else fall back to strategy default
+        cancel_secs = (
+            signal.cancel_after_secs
+            if signal.cancel_after_secs is not None
+            else self._cancel_secs(strategy.NAME)
+        )
         order = await self.order_mgr.place_order(
             token_id=token_id,
             side="BUY",
             price=signal.suggested_price,
             size=size,
             strategy=strategy.NAME,
-            cancel_after_secs=self._cancel_secs(strategy.NAME),
+            cancel_after_secs=cancel_secs,
             fee_rate_bps=0,  # maker = zero fee
         )
 
@@ -282,20 +302,25 @@ class BotOrchestrator:
             shares=shares,
             entry_price=signal.suggested_price,
             size_usdc=size,
+            window_close_ts=market.window_close_ts,
         )
         self.tracker.add_position(position)
 
         # Notify strategy
-        if hasattr(strategy, "record_trade"):
+        if strategy.NAME == "flash_crash" and hasattr(strategy, "record_leg1"):
+            # Record leg1 so hedge check works; hedge is signalled on next analyze() call
+            strategy.record_leg1(market.slug, signal.direction,
+                                 signal.suggested_price, size, token_id)
+        elif hasattr(strategy, "record_trade"):
             strategy.record_trade(market.slug)
-        elif strategy.NAME == "pair_cost_avg" and hasattr(strategy, "record_fill"):
-            # Will be called when filled
-            pass
+        elif strategy.NAME == "pair_cost_avg" and hasattr(strategy, "record_order_placed"):
+            # Pass price so Phase 2 combined cost check uses real leg1 price.
+            strategy.record_order_placed(market.slug, signal.direction, signal.suggested_price)
 
         # Dashboard broadcast
         try:
             from dashboard.server import broadcast_trade
-            asyncio.create_task(broadcast_trade({
+            self._create_task(broadcast_trade({
                 "strategy": strategy.NAME,
                 "direction": signal.direction,
                 "price": signal.suggested_price,
@@ -304,6 +329,39 @@ class BotOrchestrator:
             }))
         except Exception:
             pass
+
+    async def _place_mm_quotes(self, strategy, signal, state):
+        """Place two-sided market maker quotes for UP and DOWN tokens."""
+        from strategies.market_maker import MarketMaker
+        market = state.market
+        quotes = strategy.parse_quotes(signal)
+        if not quotes:
+            return
+
+        mm_size = min(3.0, self.bankroll.available / 4)
+        if mm_size < 1.0:
+            return
+
+        for direction, price in [
+            ("UP", quotes.up_bid),
+            ("DOWN", quotes.down_bid),
+        ]:
+            token_id = market.up_token_id if direction == "UP" else market.down_token_id
+            ok, reason = self.risk.check(mm_size, "market_maker", market.slug)
+            if not ok:
+                continue
+            order = await self.order_mgr.place_order(
+                token_id=token_id,
+                side="BUY",
+                price=price,
+                size=mm_size,
+                strategy="market_maker",
+                cancel_after_secs=config.MM_REFRESH_SECS * 1.5,
+                fee_rate_bps=0,
+            )
+            if order:
+                self.bankroll.allocate(mm_size)
+                log.info("MM quote placed: BUY %s @ %.3f size=$%.2f", direction, price, mm_size)
 
     async def _on_new_window(self, market):
         """Called when a new market window opens."""
@@ -322,21 +380,34 @@ class BotOrchestrator:
     async def _on_fill(self, order):
         """Called when an order is detected as filled."""
         log.info("Fill detected: %s | strategy=%s", order.order_id, order.strategy)
-        self.bankroll.deallocate(order.size)
+        # Capital stays allocated until settlement (position closes), not at fill time.
 
-        # Notify pair cost strategy of fill
+        # Notify strategies of fill
+        market = self.watcher.current
         for strategy in self.strategies:
             if strategy.NAME == "pair_cost_avg" and hasattr(strategy, "record_fill"):
-                market = self.watcher.current
                 if market:
-                    # Find direction from token_id
                     direction = "UP" if order.token_id == market.up_token_id else "DOWN"
                     strategy.record_fill(market.slug, direction, order.price, order.size)
+            elif strategy.NAME == "flash_crash" and hasattr(strategy, "record_hedge"):
+                if market and order.strategy == "flash_crash":
+                    direction = "UP" if order.token_id == market.up_token_id else "DOWN"
+                    # If this fill is the hedge leg (opposite of the open leg), record it
+                    if market.slug in strategy._open_legs:
+                        leg = strategy._open_legs[market.slug]
+                        if leg.direction != direction:
+                            strategy.record_hedge(market.slug, order.price)
 
     async def _on_pnl_update(self, position, pnl: float):
         """Called when a position is settled."""
+        # Release the capital that was locked for this position
+        self.bankroll.deallocate(position.size_usdc)
         self.bankroll.realize_pnl(pnl)
-        self.guard.record_win() if pnl > 0 else self.guard.record_loss()
+        # PUSH (pnl == 0, outcome == "PUSH") is a forced expiry, not a real loss.
+        if pnl > 0:
+            self.guard.record_win()
+        elif position.outcome != "PUSH":
+            self.guard.record_loss()
         self.guard.check_daily_loss(self.tracker._current_daily_pnl())
 
         # Log to SQLite (find trade by order strategy+slug+direction)
@@ -355,7 +426,7 @@ class BotOrchestrator:
         try:
             from dashboard.server import broadcast_bankroll
             summary = self.tracker.summary()
-            asyncio.create_task(broadcast_bankroll(
+            self._create_task(broadcast_bankroll(
                 self.bankroll.bankroll, summary.get("daily_pnl", 0.0)
             ))
         except Exception:
@@ -387,6 +458,7 @@ class BotOrchestrator:
     def _cancel_secs(strategy_name: str) -> Optional[float]:
         """Order auto-cancel timeout per strategy."""
         cancel_map = {
+            "pair_cost_avg": 120.0,   # fallback — normally overridden by signal.cancel_after_secs
             "endcycle_sniper": 20.0,
             "latency_arb": config.LATENCY_CANCEL_SECS,
             "flash_crash": 30.0,
@@ -421,11 +493,12 @@ class BotOrchestrator:
             up_price=book_up.mid_price if book_up else market.up_price,
             down_price=book_down.mid_price if book_down else market.down_price,
             up_bid=book_up.best_bid if book_up else 0.0,
-            up_ask=book_up.best_ask if book_up else 1.0,
+            up_ask=book_up.best_ask if book_up else market.up_price,
             down_bid=book_down.best_bid if book_down else 0.0,
-            down_ask=book_down.best_ask if book_down else 1.0,
+            down_ask=book_down.best_ask if book_down else market.down_price,
             orderflow_imbalance_up=self.orderbook_feed.orderflow_imbalance(market.up_token_id),
             orderflow_imbalance_down=self.orderbook_feed.orderflow_imbalance(market.down_token_id),
+            btc_open=self.binance_feed.window_open,
             seconds_remaining=market.seconds_remaining(),
         )
 

@@ -47,13 +47,17 @@ class MarketState:
     orderflow_imbalance_up: float = 0.0
     orderflow_imbalance_down: float = 0.0
 
+    # BTC window open price (for Monte Carlo)
+    btc_open: float = 0.0
+
     # Timing
     seconds_remaining: float = 300.0
     timestamp: float = field(default_factory=time.time)
 
     def time_fraction(self) -> float:
         """Fraction of window elapsed (0=start, 1=end)."""
-        total = 300.0  # default 5m
+        import config
+        total = float(config.WINDOW_INTERVAL)
         elapsed = total - self.seconds_remaining
         return min(1.0, max(0.0, elapsed / total))
 
@@ -64,11 +68,12 @@ class MarketState:
 
 @dataclass
 class Signal:
-    direction: str = "NEUTRAL"     # UP | DOWN | NEUTRAL
-    confidence: float = 0.0        # 0.0 to 1.0
-    suggested_price: float = 0.50  # maker order price
-    suggested_size: float = 0.0    # USDC to spend
-    reason: str = ""               # human-readable explanation
+    direction: str = "NEUTRAL"                  # UP | DOWN | NEUTRAL
+    confidence: float = 0.0                     # 0.0 to 1.0
+    suggested_price: float = 0.50               # maker order price
+    suggested_size: float = 0.0                 # USDC to spend
+    reason: str = ""                            # human-readable explanation
+    cancel_after_secs: Optional[float] = None   # override default TTL per-signal
 
     def is_actionable(self) -> bool:
         """True if this signal should lead to a trade.

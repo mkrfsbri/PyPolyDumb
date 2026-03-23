@@ -131,7 +131,7 @@ class MarketMaker(BaseStrategy):
             else:
                 self._inventory.usdc_down = max(0, self._inventory.usdc_down - size_usdc)
 
-    def clear_window(self):
+    def clear_window(self, slug: str = ""):
         """Reset at window boundary."""
         self._inventory = MMInventory()
         self._active_orders.clear()

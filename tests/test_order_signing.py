@@ -123,6 +123,37 @@ class TestOrderManager(unittest.TestCase):
         # If order placed, it went through with fee_rate_bps=0
         self.assertTrue(order.simulated)
 
+    def test_simulate_fills_fires_callback(self):
+        """In dry_run, simulated orders should auto-fill and trigger callbacks."""
+        import time
+        order = self._run(self.order_mgr.place_order("0xa", "BUY", 0.90, 5.0, "test"))
+        self.assertIsNotNone(order)
+
+        filled_orders = []
+
+        async def fill_cb(o):
+            filled_orders.append(o)
+
+        self.order_mgr.on_fill(fill_cb)
+
+        # Force the order to appear old enough to fill (>= 2s threshold)
+        order.placed_at -= 3.0
+
+        self._run(self.order_mgr._simulate_fills())
+
+        self.assertTrue(order.filled)
+        self.assertEqual(len(filled_orders), 1)
+        self.assertEqual(filled_orders[0].order_id, order.order_id)
+        # Should no longer appear as open
+        self.assertEqual(len(self.order_mgr.get_open_orders()), 0)
+
+    def test_simulate_fills_respects_delay(self):
+        """Orders placed <2s ago should not be filled yet."""
+        order = self._run(self.order_mgr.place_order("0xa", "BUY", 0.90, 5.0, "test"))
+        # placed_at is now — age < 2s
+        self._run(self.order_mgr._simulate_fills())
+        self.assertFalse(order.filled)
+
 
 class TestMarketDiscovery(unittest.TestCase):
     def test_slug_is_deterministic(self):
@@ -161,6 +192,43 @@ class TestMarketDiscovery(unittest.TestCase):
         self.assertEqual(ts1 - ts0, 300)
 
 
+class TestParseEndDate(unittest.TestCase):
+    """_parse_end_date should derive close_ts from slug when API gives date-only."""
+
+    def _call(self, end_date, slug=""):
+        from core.market_discovery import _parse_end_date
+        return _parse_end_date(end_date, slug)
+
+    def test_datetime_with_time_component(self):
+        """Full ISO datetime should be used as-is."""
+        ts = self._call("2026-03-21T14:35:00Z")
+        import datetime
+        dt = datetime.datetime.utcfromtimestamp(ts)
+        self.assertEqual(dt.hour, 14)
+        self.assertEqual(dt.minute, 35)
+
+    def test_date_only_falls_back_to_slug(self):
+        """Date-only endDate (midnight UTC) should be ignored; close_ts from slug."""
+        open_ts = 1774075500  # divisible by 300
+        slug = f"btc-updown-5m-{open_ts}"
+        ts = self._call("2026-03-21", slug)
+        self.assertEqual(ts, open_ts + 300)
+
+    def test_date_only_15m_slug(self):
+        open_ts = 1774074600  # divisible by 900
+        slug = f"btc-updown-15m-{open_ts}"
+        ts = self._call("2026-03-21", slug)
+        self.assertEqual(ts, open_ts + 900)
+
+    def test_no_end_date_no_slug_uses_boundary(self):
+        """Total fallback: next aligned window boundary."""
+        import time
+        ts = self._call("", "")
+        now = int(time.time())
+        self.assertGreater(ts, now)
+        self.assertEqual(ts % 300, 0)
+
+
 class TestFetchMarketParsing(unittest.IsolatedAsyncioTestCase):
     """Test _extract_all_tokens and fetch_market response parsing logic."""
 
@@ -176,6 +244,21 @@ class TestFetchMarketParsing(unittest.IsolatedAsyncioTestCase):
         tokens = _extract_all_tokens(market)
         self.assertEqual(len(tokens), 2)
         self.assertEqual(tokens[0]["tokenId"], "aaa")
+
+    def test_extract_tokens_clob_token_ids(self):
+        """Shape B: clobTokenIds as JSON strings (real Gamma API format)."""
+        from core.market_discovery import _extract_all_tokens
+        market = {
+            "clobTokenIds": '["UP_ID", "DN_ID"]',
+            "outcomes": '["Up", "Down"]',
+            "outcomePrices": '["0.58", "0.42"]',
+        }
+        tokens = _extract_all_tokens(market)
+        self.assertEqual(len(tokens), 2)
+        self.assertEqual(tokens[0]["tokenId"], "UP_ID")
+        self.assertEqual(tokens[0]["outcome"], "Up")
+        self.assertAlmostEqual(float(tokens[0]["price"]), 0.58)
+        self.assertEqual(tokens[1]["tokenId"], "DN_ID")
 
     def test_extract_tokens_missing(self):
         """No tokens field → empty list."""
@@ -283,6 +366,39 @@ class TestFetchMarketParsing(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.up_token_id, "UP_SNAKE")
         self.assertEqual(result.down_token_id, "DN_SNAKE")
+
+    async def test_fetch_market_clob_token_ids(self):
+        """Shape B: real Gamma API format with clobTokenIds + outcomes + outcomePrices."""
+        from unittest.mock import AsyncMock, MagicMock
+        from core.market_discovery import fetch_market
+
+        fake_response = [{
+            "conditionId": "0x" + "e" * 64,
+            "slug": "btc-updown-5m-1000000200",
+            "endDateIso": "2001-09-08T21:50:00Z",
+            "tokens": [],
+            "clobTokenIds": '["UP_CLOB", "DN_CLOB"]',
+            "outcomes": '["Up", "Down"]',
+            "outcomePrices": '["0.58", "0.42"]',
+        }]
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=fake_response)
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_cm)
+
+        result = await fetch_market("btc-updown-5m-1000000200", mock_session)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.up_token_id, "UP_CLOB")
+        self.assertEqual(result.down_token_id, "DN_CLOB")
+        self.assertAlmostEqual(result.up_price, 0.58)
+        self.assertAlmostEqual(result.down_price, 0.42)
 
 
 if __name__ == "__main__":

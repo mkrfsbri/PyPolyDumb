@@ -39,19 +39,26 @@ STARTING_BANKROLL: float = float(os.getenv("STARTING_BANKROLL", "100.0"))
 MAX_BET_FRACTION: float = float(os.getenv("MAX_BET_FRACTION", "0.10"))
 MAX_DAILY_LOSS_FRACTION: float = float(os.getenv("MAX_DAILY_LOSS_FRACTION", "0.20"))
 MIN_BANKROLL: float = float(os.getenv("MIN_BANKROLL", "20.0"))
-MAX_CONCURRENT_POSITIONS: int = 3
+MAX_CONCURRENT_POSITIONS: int = 4   # pair(1+2) + leg3 + endcycle_sniper = 4 max
 CIRCUIT_BREAK_LOSSES: int = 3       # consecutive losses before pause
 CIRCUIT_BREAK_DAILY_LOSS: float = 0.15  # daily loss fraction before pause
 COOLDOWN_SECONDS: int = 900          # 15 min cooldown after circuit break
 
 # ── Strategy-specific constants ───────────────────────────────────────────────
 ENDCYCLE_HIGH_SCORE: float = 14.0   # out of 20
-ENDCYCLE_MED_SCORE: float = 10.0
+ENDCYCLE_MED_SCORE: float = 7.0     # lowered from 10 — real markets rarely exceed 10 on small delta
 ENDCYCLE_ACTIVATION_SECS: int = 30  # activate T-30s before window end
 ENDCYCLE_DEACTIVATE_SECS: int = 10  # stop at T-10s
 
-PAIR_COST_MAX: float = 0.97         # max pair cost to enter
-PAIR_COST_TRIGGER: float = 0.35     # buy when either side < this
+PAIR_COST_MAX: float = 0.97         # max combined pair cost to lock — guarantees profit
+PAIR_LEG_DISCOUNT: float = 0.02    # limit order placed this many cents below ask
+PAIR_LEG1_TTL: int = 120           # seconds before Leg 1 order auto-cancels
+PAIR_LEG2_TTL: int = 90            # seconds before Leg 2 order auto-cancels
+PAIR_MIN_ENTRY_SECS: int = 255     # only enter Leg 1 if window >= this (5m: first ~45s)
+PAIR_LEG3_THRESHOLD: float = 0.85  # token price min to trigger Leg 3 momentum bet
+PAIR_LEG3_MAX_PRICE: float = 0.99  # token price max — skip if >= 0.99 (no upside left)
+PAIR_LEG3_ACTIVATION: int = 15     # seconds remaining to activate Leg 3
+MAX_SHARES_PER_LEG: int = 10       # fixed shares per leg (pair_cost_avg + endcycle_sniper)
 
 LATENCY_MIN_EDGE: float = 0.08      # minimum spot-vs-market edge
 LATENCY_CANCEL_SECS: int = 15       # cancel unfilled order after 15s
@@ -105,6 +112,7 @@ def estimate_token_price(delta_pct: float) -> float:
 
 
 def sigmoid(x: float) -> float:
+    x = max(-500.0, min(500.0, x))  # clamp to prevent overflow
     return 1.0 / (1.0 + math.exp(-x))
 
 

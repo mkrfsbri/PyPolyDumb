@@ -45,11 +45,15 @@ class EndCycleSniper(BaseStrategy):
 
     async def analyze(self, state: MarketState) -> Signal:
         # Only active during end-cycle window
-        if not state.is_end_cycle(
+        in_window = state.is_end_cycle(
             activation_secs=config.ENDCYCLE_ACTIVATION_SECS,
             deactivate_secs=config.ENDCYCLE_DEACTIVATE_SECS,
-        ):
+        )
+        if not in_window:
             return Signal(reason="Outside end-cycle window")
+
+        log.info("EndCycleSniper: activation window | remaining=%.0fs delta=%.5f",
+                 state.seconds_remaining, state.window_delta)
 
         # Already fired this window?
         if self._last_signal_window == state.market.slug:
@@ -60,13 +64,14 @@ class EndCycleSniper(BaseStrategy):
 
         # Skip coin-flip territory
         if abs_delta < 0.0002:
+            log.info("EndCycleSniper: delta too small (%.5f) — skipping", delta)
             return Signal(reason=f"Delta too small ({delta:.4%})")
 
         direction = "UP" if delta > 0 else "DOWN"
         score = self._compute_score(state, direction)
 
-        log.debug("EndCycleSniper score=%.1f/20 delta=%.4f dir=%s",
-                  score, delta, direction)
+        log.info("EndCycleSniper: score=%.1f/20 delta=%.5f dir=%s remaining=%.0fs",
+                 score, delta, direction, state.seconds_remaining)
 
         if score >= HIGH_SCORE:
             confidence = min(0.95, 0.70 + (score - HIGH_SCORE) * 0.03)
@@ -75,6 +80,8 @@ class EndCycleSniper(BaseStrategy):
             confidence = 0.60 + (score - MED_SCORE) * 0.02
             entry_price = PRICE_MED
         else:
+            log.info("EndCycleSniper: score %.1f below threshold %.1f — no trade",
+                     score, MED_SCORE)
             return Signal(reason=f"Score {score:.1f} below threshold {MED_SCORE}")
 
         return Signal(
@@ -122,6 +129,8 @@ class EndCycleSniper(BaseStrategy):
                 score += 3.0
             else:
                 score += 1.0  # opposing signal
+        else:
+            score += 1.5  # feed not warmed up — neutral
 
         # 3. RSI (2 pts)
         if state.rsi > 0:
@@ -139,7 +148,7 @@ class EndCycleSniper(BaseStrategy):
             score += 1.0
 
         # 5. Orderflow imbalance (3 pts)
-        imbalance = state.orderflow_imbalance_up if is_up else -state.orderflow_imbalance_down
+        imbalance = state.orderflow_imbalance_up if is_up else state.orderflow_imbalance_down
         if imbalance > 0.2:
             score += 3.0
         elif imbalance > 0:
@@ -164,5 +173,7 @@ class EndCycleSniper(BaseStrategy):
                 score += 1.0
             else:
                 score += 0.0
+        else:
+            score += 0.5  # BB feed not warmed up — neutral
 
         return score

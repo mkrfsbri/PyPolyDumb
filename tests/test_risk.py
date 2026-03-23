@@ -161,11 +161,88 @@ class TestRiskLimits(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("concurrent", reason.lower())
 
+    def test_position_limit_scoped_to_current_window(self):
+        """Positions from past windows must not block trading in the current window."""
+        import config
+        from risk.bankroll_manager import BankrollManager
+        from risk.risk_limits import RiskLimits
+        from unittest.mock import MagicMock
+
+        bm = BankrollManager(100.0)
+        tracker = MagicMock()
+        tracker.summary.return_value = {"daily_pnl": 0.0}
+
+        # open_positions(window_slug=...) returns 0 (current window is fresh)
+        # open_positions() (no slug) would return 3 (stale from old window)
+        def mock_open_positions(window_slug=None):
+            if window_slug == "btc-updown-5m-current":
+                return []
+            return [None] * config.MAX_CONCURRENT_POSITIONS
+
+        tracker.open_positions.side_effect = mock_open_positions
+        limits = RiskLimits(bm, tracker)
+
+        ok, reason = limits.check(5.0, "test", "btc-updown-5m-current")
+        self.assertTrue(ok, f"Should allow trade in fresh window, got: {reason}")
+
     def test_max_allowed_size(self):
         limits = self._make_limits()
         max_size = limits.max_allowed_size()
         self.assertGreater(max_size, 0)
         self.assertLessEqual(max_size, 10.0)
+
+
+class TestPositionTrackerExpiry(unittest.TestCase):
+    """Stale positions must be force-settled so the position limit doesn't block trading."""
+
+    def _make_position(self, slug, close_ts, direction="UP"):
+        from core.position_tracker import Position
+        return Position(
+            window_slug=slug,
+            token_id="0xtoken",
+            direction=direction,
+            strategy="pair_cost_avg",
+            shares=5.0,
+            entry_price=0.20,
+            size_usdc=5.0,
+            window_close_ts=close_ts,
+        )
+
+    def test_push_expiry_after_grace(self):
+        """Position whose window closed > 120s ago should be force-settled as PUSH."""
+        from core.position_tracker import PositionTracker
+        tracker = PositionTracker()
+        pos = self._make_position("btc-updown-5m-111", time.time() - 200)
+        tracker.add_position(pos)
+
+        tracker._expire_stale_positions()
+
+        self.assertTrue(pos.closed)
+        self.assertEqual(pos.outcome, "PUSH")
+        self.assertEqual(pos.realized_pnl, 0.0)
+
+    def test_no_expiry_within_grace(self):
+        """Position whose window closed < 30s ago must NOT be force-settled yet."""
+        from core.position_tracker import PositionTracker
+        tracker = PositionTracker()
+        pos = self._make_position("btc-updown-5m-222", time.time() - 10)
+        tracker.add_position(pos)
+
+        tracker._expire_stale_positions()
+
+        self.assertFalse(pos.closed)
+
+    def test_push_settle_zeroes_pnl(self):
+        """PUSH outcome must have zero realized PnL."""
+        from core.position_tracker import PositionTracker, WindowResult
+        tracker = PositionTracker()
+        pos = self._make_position("btc-updown-5m-333", time.time() - 200)
+        tracker.add_position(pos)
+        result = WindowResult(slug=pos.window_slug, direction="PUSH", resolved_at=time.time())
+        tracker._settle(pos, result)
+        self.assertEqual(pos.outcome, "PUSH")
+        self.assertEqual(pos.realized_pnl, 0.0)
+        self.assertTrue(pos.closed)
 
 
 if __name__ == "__main__":
