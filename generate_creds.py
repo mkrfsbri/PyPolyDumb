@@ -71,17 +71,11 @@ try:
     r = client_l2.update_balance_allowance(
         BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=SIG_TYPE)
     )
-    print(f"  COLLATERAL (USDC)  : {r}")
+    print(f"  COLLATERAL (USDC)  : OK {r or ''}")
 except Exception as e:
     print(f"  COLLATERAL error   : {e}")
 
-try:
-    r = client_l2.update_balance_allowance(
-        BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, signature_type=SIG_TYPE)
-    )
-    print(f"  CONDITIONAL tokens : {r}")
-except Exception as e:
-    print(f"  CONDITIONAL error  : {e}")
+print("  CONDITIONAL tokens : di-sync per-token saat order ditempatkan (butuh token_id)")
 
 print()
 

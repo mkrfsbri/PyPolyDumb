@@ -106,16 +106,31 @@ class PolymarketClient:
             log.error("Failed to initialize ClobClient: %s", e)
             return False
 
-    def _sync_allowances(self) -> None:
-        """Sync on-chain USDC + conditional token allowances with CLOB server."""
+    def _sync_allowances(self, token_id: str = None) -> None:
+        """Sync on-chain allowances with CLOB server.
+
+        COLLATERAL (USDC) can be synced globally.
+        CONDITIONAL (ERC-1155) requires a specific token_id.
+        """
         sig = config.POLY_SIGNATURE_TYPE
-        for asset in (AssetType.COLLATERAL, AssetType.CONDITIONAL):
+        try:
+            self._client.update_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig)
+            )
+        except Exception as e:
+            log.warning("update_balance_allowance(COLLATERAL) failed: %s", e)
+
+        if token_id:
             try:
                 self._client.update_balance_allowance(
-                    BalanceAllowanceParams(asset_type=asset, signature_type=sig)
+                    BalanceAllowanceParams(
+                        asset_type=AssetType.CONDITIONAL,
+                        token_id=token_id,
+                        signature_type=sig,
+                    )
                 )
             except Exception as e:
-                log.warning("update_balance_allowance(%s) failed: %s", asset, e)
+                log.warning("update_balance_allowance(CONDITIONAL, %s) failed: %s", token_id[:8], e)
 
     # ── Order placement ────────────────────────────────────────────────────────
 
@@ -133,6 +148,8 @@ class PolymarketClient:
 
         if self._mode == "dry_run" or not CLOB_AVAILABLE or self._client is None:
             return self._simulate_order(token_id, side, price, shares)
+
+        self._sync_allowances(token_id=token_id)
 
         order_args = OrderArgs(
             token_id=token_id,
