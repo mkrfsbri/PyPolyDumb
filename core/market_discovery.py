@@ -34,6 +34,7 @@ class MarketInfo:
     window_close_ts: int    # unix timestamp of window end
     up_price: float = 0.50
     down_price: float = 0.50
+    neg_risk: bool = True   # BTC binary markets use the NegRisk exchange adapter
 
     def seconds_remaining(self) -> float:
         return max(0.0, self.window_close_ts - time.time())
@@ -87,6 +88,8 @@ async def fetch_market(slug: str, session: aiohttp.ClientSession) -> Optional[Ma
             all_tokens = _extract_all_tokens(top)
             condition_id = top.get("conditionId") or top.get("condition_id") or ""
             end_date = top.get("endDateIso") or top.get("endDate") or top.get("end_date_iso") or ""
+            # Gamma API exposes neg_risk at market level; default True for BTC binary markets
+            neg_risk = bool(top.get("negRisk") or top.get("neg_risk") or True)
 
             # If top-level has no useful tokens, dig into sub-markets
             if len(all_tokens) < 2:
@@ -158,6 +161,7 @@ async def fetch_market(slug: str, session: aiohttp.ClientSession) -> Optional[Ma
                 window_close_ts=close_ts,
                 up_price=up_price,
                 down_price=down_price,
+                neg_risk=neg_risk,
             )
 
     except asyncio.TimeoutError:

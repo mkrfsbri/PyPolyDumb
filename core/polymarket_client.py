@@ -24,9 +24,9 @@ try:
         AssetType,
         BalanceAllowanceParams,
         BookParams,
+        CreateOrderOptions,
         OrderArgs,
         OrderType,
-        PartialCreateOrderOptions,
     )
     CLOB_AVAILABLE = True
 except ImportError:
@@ -141,8 +141,15 @@ class PolymarketClient:
         price: float,       # 0.0 – 1.0
         size: float,        # USDC amount (will be converted to shares)
         fee_rate_bps: int = 0,
+        neg_risk: bool = True,
     ) -> OrderResult:
-        """Place a GTC limit (maker) order. fee_rate_bps=0 for maker."""
+        """Place a GTC limit (maker) order.
+
+        Uses builder.create_order directly (bypasses ClobClient.__resolve_fee_rate)
+        so that fee_rate_bps=0 is honoured for maker orders.  neg_risk must come
+        from the Gamma API (MarketInfo.neg_risk); the CLOB /neg-risk endpoint is
+        unreliable for BTC binary markets.
+        """
         shares = round(size / price, 2)
         shares = max(shares, config.POLY_MIN_SHARES)
 
@@ -151,28 +158,32 @@ class PolymarketClient:
 
         self._sync_allowances(token_id=token_id)
 
+        # Fetch tick_size via the ClobClient cache (no fee_rate resolution here).
+        tick_size = self._client.get_tick_size(token_id)
+
         order_args = OrderArgs(
             token_id=token_id,
             price=price,
             size=shares,
             side=side,
-            fee_rate_bps=fee_rate_bps,
+            fee_rate_bps=fee_rate_bps,  # stays 0 — builder doesn't override it
         )
-        neg_risk = self._client.get_neg_risk(token_id)
-        options = PartialCreateOrderOptions(neg_risk=neg_risk)
+        options = CreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk)
 
         for attempt, delay in enumerate([0, 2, 4, 8]):
             if delay:
                 await asyncio.sleep(delay)
             try:
-                order = self._client.create_order(order_args, options)
+                # Call builder directly — ClobClient.create_order would override
+                # fee_rate_bps with the market's taker rate via __resolve_fee_rate.
+                order = self._client.builder.create_order(order_args, options)
                 od = order.dict()
                 log.debug(
                     "Signed order: maker=%s signer=%s sigType=%s feeRate=%s "
                     "makerAmt=%s takerAmt=%s neg_risk=%s",
                     od.get("maker"), od.get("signer"), od.get("signatureType"),
                     od.get("feeRateBps"), od.get("makerAmount"), od.get("takerAmount"),
-                    self._client.get_neg_risk(token_id),
+                    neg_risk,
                 )
                 resp = self._client.post_order(order, OrderType.GTC)
                 order_id = resp.get("orderID", "") or resp.get("id", "")
