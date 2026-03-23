@@ -69,7 +69,6 @@ class OrderManager:
         strategy: str,
         cancel_after_secs: Optional[float] = None,
         fee_rate_bps: int = 0,
-        neg_risk: bool = True,
     ) -> Optional[ManagedOrder]:
         """Place a maker order and register it for tracking."""
         result: OrderResult = await self._client.place_maker_order(
@@ -78,7 +77,6 @@ class OrderManager:
             price=price,
             size=size,
             fee_rate_bps=fee_rate_bps,
-            neg_risk=neg_risk,
         )
 
         if not result.success:

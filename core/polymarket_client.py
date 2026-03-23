@@ -141,14 +141,14 @@ class PolymarketClient:
         price: float,       # 0.0 – 1.0
         size: float,        # USDC amount (will be converted to shares)
         fee_rate_bps: int = 0,
-        neg_risk: bool = True,
     ) -> OrderResult:
         """Place a GTC limit (maker) order.
 
-        Uses builder.create_order directly (bypasses ClobClient.__resolve_fee_rate)
-        so that fee_rate_bps=0 is honoured for maker orders.  neg_risk must come
-        from the Gamma API (MarketInfo.neg_risk); the CLOB /neg-risk endpoint is
-        unreliable for BTC binary markets.
+        Uses builder.create_order directly to bypass ClobClient.__resolve_fee_rate,
+        which incorrectly overrides fee_rate_bps=0 with the market's taker rate.
+        neg_risk is fetched from the CLOB /neg-risk endpoint — the same source the
+        server uses when verifying the EIP-712 signature, so both sides agree on the
+        verifying contract address.
         """
         shares = round(size / price, 2)
         shares = max(shares, config.POLY_MIN_SHARES)
@@ -158,8 +158,9 @@ class PolymarketClient:
 
         self._sync_allowances(token_id=token_id)
 
-        # Fetch tick_size via the ClobClient cache (no fee_rate resolution here).
+        # Both values fetched via ClobClient's cached API calls.
         tick_size = self._client.get_tick_size(token_id)
+        neg_risk  = self._client.get_neg_risk(token_id)
 
         order_args = OrderArgs(
             token_id=token_id,

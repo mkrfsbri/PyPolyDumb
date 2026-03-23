@@ -270,7 +270,6 @@ class BotOrchestrator:
             strategy=strategy.NAME,
             cancel_after_secs=cancel_secs,
             fee_rate_bps=0,  # maker = zero fee
-            neg_risk=market.neg_risk,
         )
 
         if not order:
@@ -359,7 +358,6 @@ class BotOrchestrator:
                 strategy="market_maker",
                 cancel_after_secs=config.MM_REFRESH_SECS * 1.5,
                 fee_rate_bps=0,
-                neg_risk=market.neg_risk,
             )
             if order:
                 self.bankroll.allocate(mm_size)
