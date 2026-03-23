@@ -141,13 +141,19 @@ class PolymarketClient:
         price: float,       # 0.0 – 1.0
         size: float,        # USDC amount (will be converted to shares)
         fee_rate_bps: int = 0,
+        neg_risk: bool = True,
     ) -> OrderResult:
         """Place a GTC limit (maker) order.
 
         Uses builder.create_order directly to bypass ClobClient.__resolve_fee_rate,
         which incorrectly overrides fee_rate_bps=0 with the market's taker rate.
-        neg_risk is resolved via the CLOB /neg-risk endpoint so the signing domain
-        matches what the server uses for EIP-712 verification.
+
+        neg_risk must come from the Gamma API (MarketInfo.neg_risk), NOT from the
+        CLOB /neg-risk endpoint.  For BTC up/down markets, CLOB /neg-risk returns
+        False but the server validates signatures against the NegRisk exchange
+        (0xC5d563A3...) because Gamma reports negRisk=true.  Using the wrong
+        exchange address causes an EIP-712 domain separator mismatch → 400 invalid
+        signature.
         """
         shares = round(size / price, 2)
         shares = max(shares, config.POLY_MIN_SHARES)
@@ -158,7 +164,9 @@ class PolymarketClient:
         self._sync_allowances(token_id=token_id)
 
         tick_size = self._client.get_tick_size(token_id)
-        neg_risk  = self._client.get_neg_risk(token_id)
+        # neg_risk comes from the caller (Gamma API via MarketInfo).
+        # Do NOT use self._client.get_neg_risk() — it returns False for BTC
+        # up/down markets even though the server uses the NegRisk exchange.
 
         order_args = OrderArgs(
             token_id=token_id,

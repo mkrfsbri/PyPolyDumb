@@ -237,7 +237,11 @@ else:
         # For BTC up/down markets CLOB returns False (Normal exchange).
         # Gamma returns True (NegRisk exchange) but that causes "invalid signature".
         tick_size = client_l2.get_tick_size(TOKEN_ID)
-        neg_risk  = client_l2.get_neg_risk(TOKEN_ID)
+        # Use Gamma-derived neg_risk (True for BTC up/down).
+        # CLOB /neg-risk returns False for these tokens but the server
+        # validates against the NegRisk exchange (0xC5d5...) — using
+        # False causes an EIP-712 domain mismatch → "invalid signature".
+        neg_risk  = _MARKET_NEG_RISK
         order_args = OrderArgs(
             token_id=TOKEN_ID,
             price=PRICE,
@@ -264,7 +268,7 @@ else:
         print(f"  takerAmount   : {od.get('takerAmount')}")
         print(f"  side          : {od.get('side')}")
         print(f"  tick_size     : {tick_size}")
-        print(f"  neg_risk      : {neg_risk}  (CLOB API)  vs  {_MARKET_NEG_RISK}  (Gamma)")
+        print(f"  neg_risk      : {neg_risk}  (Gamma API ← correct)")
         print(f"  sig[:22]      : {od.get('signature','')[:22]}...")
         print()
 
