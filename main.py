@@ -86,6 +86,7 @@ class BotOrchestrator:
         from core.websocket_manager import PolymarketWebSocket
         from core.order_manager import OrderManager
         from core.position_tracker import PositionTracker
+        from core.position_redeemer import PositionRedeemer
         from feeds.binance_ws import BinanceFeed
         from feeds.chainlink_feed import ChainlinkFeed
         from feeds.orderbook_feed import OrderbookFeed
@@ -105,6 +106,7 @@ class BotOrchestrator:
         self.poly_ws = PolymarketWebSocket()
         self.order_mgr = OrderManager(self.client)
         self.tracker = PositionTracker()
+        self.redeemer = PositionRedeemer()
         self.binance_feed = BinanceFeed()
         self.chainlink_feed = ChainlinkFeed()
         self.orderbook_feed = OrderbookFeed(self.poly_ws)
@@ -158,6 +160,7 @@ class BotOrchestrator:
             asyncio.create_task(self.order_mgr.run(), name="order_manager"),
             asyncio.create_task(self.tracker.run(), name="position_tracker"),
             asyncio.create_task(self.chainlink_feed.run(), name="chainlink"),
+            asyncio.create_task(self.redeemer.run(), name="position_redeemer"),
             asyncio.create_task(self._eval_loop(), name="eval_loop"),
             asyncio.create_task(self._bankroll_log_loop(), name="bankroll_log"),
         ]
@@ -370,6 +373,10 @@ class BotOrchestrator:
         log.info("Window opened: %s | %s remaining",
                  market.slug, int(market.seconds_remaining()))
 
+        # Queue the PREVIOUS window for redemption (it just closed).
+        if self._current_market and self._current_market.slug != market.slug:
+            self.redeemer.queue(self._current_market)
+
         # Subscribe Polymarket WS to new token pair
         self.poly_ws.subscribe(market.up_token_id, market.down_token_id)
         self._current_market = market
@@ -512,6 +519,7 @@ class BotOrchestrator:
         self.order_mgr.stop()
         self.tracker.stop()
         self.chainlink_feed.stop()
+        self.redeemer.stop()
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
