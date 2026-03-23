@@ -7,7 +7,6 @@ EIP-712 signature yang dibuat lokal valid (signer bisa di-recover).
 """
 
 import os
-import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,8 +22,6 @@ if not KEY or not FUND:
 from eth_account import Account
 from eth_utils import keccak, to_checksum_address
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OrderArgs
 from py_clob_client.config import get_contract_config
 
 # ── 1. Verifikasi dasar ────────────────────────────────────────────────────
@@ -61,11 +58,11 @@ print("Membuat order dummy untuk verifikasi signing...")
 # Token BTC YES 5m (dummy — tidak dikirim ke API)
 DUMMY_TOKEN = "20237547420640173970854278910041369523140337546333913520867861759044515484018"
 
-from py_clob_client.order_builder.builder import OrderBuilder
 from py_clob_client.signer import Signer as ClobSigner
 from py_order_utils.signer import Signer as UtilsSigner
 from py_order_utils.builders.order_builder import OrderBuilder as UtilsOrderBuilder
 from py_order_utils.model.order import OrderData
+from py_order_utils.model.sides import BUY
 
 # Ambil contract config (neg_risk=True untuk market BTC binary)
 for neg_risk_val in [False, True]:
@@ -83,7 +80,7 @@ for neg_risk_val in [False, True]:
         tokenId=DUMMY_TOKEN,
         makerAmount="1000000",   # 1 USDC.e (6 decimals)
         takerAmount="2000000",
-        side="0",               # BUY
+        side=BUY,               # integer 0, bukan string "0"
         feeRateBps="0",
         nonce="0",
         signer=sig_signer,
