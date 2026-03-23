@@ -21,6 +21,8 @@ try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import (
         ApiCreds,
+        AssetType,
+        BalanceAllowanceParams,
         BookParams,
         OrderArgs,
         OrderType,
@@ -97,11 +99,23 @@ class PolymarketClient:
                 signature_type=config.POLY_SIGNATURE_TYPE,
                 funder=config.POLY_FUNDER_ADDRESS,
             )
+            self._sync_allowances()
             log.info("ClobClient initialized (mode=%s)", self._mode)
             return True
         except Exception as e:
             log.error("Failed to initialize ClobClient: %s", e)
             return False
+
+    def _sync_allowances(self) -> None:
+        """Sync on-chain USDC + conditional token allowances with CLOB server."""
+        sig = config.POLY_SIGNATURE_TYPE
+        for asset in (AssetType.COLLATERAL, AssetType.CONDITIONAL):
+            try:
+                self._client.update_balance_allowance(
+                    BalanceAllowanceParams(asset_type=asset, signature_type=sig)
+                )
+            except Exception as e:
+                log.warning("update_balance_allowance(%s) failed: %s", asset, e)
 
     # ── Order placement ────────────────────────────────────────────────────────
 
