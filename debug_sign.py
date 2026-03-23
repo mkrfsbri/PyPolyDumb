@@ -49,33 +49,80 @@ _FALLBACK_TOKEN = (
 )
 
 def _fetch_live_btc_token() -> str:
-    """Return YES-token tokenId for the nearest active BTC binary market."""
+    """
+    Return YES-token tokenId for the nearest active BTC binary market.
+    Strategy:
+      1. Ask CLOB /markets directly — only tokens with active orderbooks appear here.
+      2. Fall back to Gamma API if CLOB returns nothing useful.
+      3. Fall back to hardcoded token as last resort.
+    """
+    import httpx
+
+    # ── 1. CLOB /markets ──────────────────────────────────────────────
     try:
-        import httpx, datetime
-        url  = "https://gamma-api.polymarket.com/markets"
-        resp = httpx.get(url, params={
-            "tag": "Crypto",
-            "active": "true",
-            "closed": "false",
-            "limit": "50",
-        }, timeout=10)
+        resp = httpx.get(
+            "https://clob.polymarket.com/markets",
+            params={"active": "true", "closed": "false"},
+            timeout=10,
+        )
         resp.raise_for_status()
-        markets = resp.json()
+        data = resp.json()
+        markets = data if isinstance(data, list) else data.get("data", [])
         for m in markets:
+            q = (m.get("question") or m.get("market_slug") or "").lower()
+            if "btc" in q:
+                tokens = m.get("tokens") or []
+                for t in tokens:
+                    if str(t.get("outcome", "")).upper() == "YES":
+                        token_id = str(t.get("token_id", ""))
+                        if token_id:
+                            print(f"  [live token/CLOB] {m.get('question','')[:60]}")
+                            return token_id
+    except Exception as e:
+        print(f"  [live token] CLOB fetch failed: {e}")
+
+    # ── 2. Gamma API fallback ─────────────────────────────────────────
+    try:
+        resp = httpx.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={"tag": "Crypto", "active": "true", "closed": "false", "limit": "50"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        for m in resp.json():
             slug = (m.get("slug") or m.get("question") or "").lower()
-            if "btc" in slug and "above" in slug:
+            if "btc" in slug and ("above" in slug or "price" in slug):
                 tokens = m.get("clobTokenIds") or []
                 if tokens:
-                    print(f"  [live token] market: {m.get('question','')[:60]}")
+                    print(f"  [live token/Gamma] {m.get('question','')[:60]}")
                     return str(tokens[0])
     except Exception as e:
-        print(f"  [live token] Gamma fetch failed: {e} — using fallback token")
+        print(f"  [live token] Gamma fetch failed: {e}")
+
+    print(f"  [live token] using hardcoded fallback — orderbook may be closed")
     return _FALLBACK_TOKEN
 
 TOKEN_ID = _fetch_live_btc_token()
 PRICE    = 0.50
 SIZE     = 5.0
 SIDE     = "BUY"
+
+# Quick sanity check: does the CLOB actually have an orderbook for this token?
+def _check_orderbook(token_id: str) -> bool:
+    try:
+        import httpx
+        r = httpx.get(
+            f"https://clob.polymarket.com/orderbook",
+            params={"token_id": token_id},
+            timeout=8,
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
+_ob_ok = _check_orderbook(TOKEN_ID)
+print(f"  TOKEN_ID[:20]: {TOKEN_ID[:20]}...")
+print(f"  CLOB orderbook exists: {'✓' if _ob_ok else '✗ (token may be inactive)'}")
 
 # ── Bagian 1: verifikasi EIP-712 lokal ───────────────────────────────────
 print()
