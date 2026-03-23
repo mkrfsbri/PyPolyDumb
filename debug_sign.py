@@ -42,9 +42,37 @@ print(f"  EOA   : {eoa}")
 print(f"  Funder: {fund_cs}")
 print(f"  SigType: {SIG_T}")
 
-# Token dari log terakhir yang gagal
-TOKEN_ID = "38112870951064265909502943213812026902920948580072601239040959889927748868" \
-           "62".replace(" ", "")
+# ── Fetch a live BTC binary token from Gamma API ─────────────────────────
+# Falls back to the last-known token if the API is unreachable.
+_FALLBACK_TOKEN = (
+    "3811287095106426590950294321381202690292094858007260123904095988992774886862"
+)
+
+def _fetch_live_btc_token() -> str:
+    """Return YES-token tokenId for the nearest active BTC binary market."""
+    try:
+        import httpx, datetime
+        url  = "https://gamma-api.polymarket.com/markets"
+        resp = httpx.get(url, params={
+            "tag": "Crypto",
+            "active": "true",
+            "closed": "false",
+            "limit": "50",
+        }, timeout=10)
+        resp.raise_for_status()
+        markets = resp.json()
+        for m in markets:
+            slug = (m.get("slug") or m.get("question") or "").lower()
+            if "btc" in slug and "above" in slug:
+                tokens = m.get("clobTokenIds") or []
+                if tokens:
+                    print(f"  [live token] market: {m.get('question','')[:60]}")
+                    return str(tokens[0])
+    except Exception as e:
+        print(f"  [live token] Gamma fetch failed: {e} — using fallback token")
+    return _FALLBACK_TOKEN
+
+TOKEN_ID = _fetch_live_btc_token()
 PRICE    = 0.50
 SIZE     = 5.0
 SIDE     = "BUY"
