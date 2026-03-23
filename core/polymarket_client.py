@@ -146,9 +146,8 @@ class PolymarketClient:
 
         Uses builder.create_order directly to bypass ClobClient.__resolve_fee_rate,
         which incorrectly overrides fee_rate_bps=0 with the market's taker rate.
-        neg_risk is hardcoded True: BTC binary markets use the NegRisk exchange
-        (0xC5d563...) and the CLOB /neg-risk endpoint returns a misleading False
-        for these token IDs.
+        neg_risk is resolved via the CLOB /neg-risk endpoint so the signing domain
+        matches what the server uses for EIP-712 verification.
         """
         shares = round(size / price, 2)
         shares = max(shares, config.POLY_MIN_SHARES)
@@ -159,10 +158,7 @@ class PolymarketClient:
         self._sync_allowances(token_id=token_id)
 
         tick_size = self._client.get_tick_size(token_id)
-        # BTC up/down binary markets always use the NegRisk exchange adapter
-        # (0xC5d563...). The CLOB /neg-risk?token_id= endpoint returns False for
-        # these tokens (misleading), so we do not call get_neg_risk() here.
-        neg_risk = True
+        neg_risk  = self._client.get_neg_risk(token_id)
 
         order_args = OrderArgs(
             token_id=token_id,
