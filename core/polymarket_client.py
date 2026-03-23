@@ -94,7 +94,7 @@ class PolymarketClient:
                 chain_id=137,           # Polygon mainnet
                 key=config.POLY_PRIVATE_KEY,
                 creds=creds,
-                signature_type=0,       # EOA wallet
+                signature_type=config.POLY_SIGNATURE_TYPE,
                 funder=config.POLY_FUNDER_ADDRESS,
             )
             log.info("ClobClient initialized (mode=%s)", self._mode)

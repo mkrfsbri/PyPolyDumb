@@ -12,6 +12,8 @@ POLY_API_KEY: str = os.getenv("POLY_API_KEY", "")
 POLY_API_SECRET: str = os.getenv("POLY_API_SECRET", "")
 POLY_API_PASSPHRASE: str = os.getenv("POLY_API_PASSPHRASE", "")
 POLY_FUNDER_ADDRESS: str = os.getenv("POLY_FUNDER_ADDRESS", "")
+# 0 = EOA (wallet biasa), 1 = Polymarket proxy (dari web polymarket.com), 2 = Gnosis Safe
+POLY_SIGNATURE_TYPE: int = int(os.getenv("POLY_SIGNATURE_TYPE", "1"))
 
 # ── Polymarket endpoints ──────────────────────────────────────────────────────
 CLOB_HOST = "https://clob.polymarket.com"
