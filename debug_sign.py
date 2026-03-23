@@ -48,61 +48,56 @@ _FALLBACK_TOKEN = (
     "3811287095106426590950294321381202690292094858007260123904095988992774886862"
 )
 
-def _fetch_live_btc_token() -> str:
+def _fetch_live_btc_token() -> tuple:
     """
-    Return YES-token tokenId for the nearest active BTC binary market.
-    Strategy:
-      1. Ask CLOB /markets directly — only tokens with active orderbooks appear here.
-      2. Fall back to Gamma API if CLOB returns nothing useful.
-      3. Fall back to hardcoded token as last resort.
+    Fetch the current BTC up/down market token using the SAME slug logic as the bot.
+    Returns (token_id, neg_risk).
     """
-    import httpx
+    import asyncio, sys, json as _json, httpx, time
 
-    # ── 1. CLOB /markets ──────────────────────────────────────────────
+    # ── 1. Bot's own market_discovery (identical slug formula) ────────
     try:
-        resp = httpx.get(
-            "https://clob.polymarket.com/markets",
-            params={"active": "true", "closed": "false"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        markets = data if isinstance(data, list) else data.get("data", [])
-        for m in markets:
-            q = (m.get("question") or m.get("market_slug") or "").lower()
-            if "btc" in q:
-                tokens = m.get("tokens") or []
-                for t in tokens:
-                    if str(t.get("outcome", "")).upper() == "YES":
-                        token_id = str(t.get("token_id", ""))
-                        if token_id:
-                            print(f"  [live token/CLOB] {m.get('question','')[:60]}")
-                            return token_id
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from core.market_discovery import get_current_market
+        market = asyncio.run(get_current_market("5m"))
+        if market:
+            print(f"  [live token/bot] slug   : {market.slug}")
+            print(f"  UP  token : {market.up_token_id[:20]}...")
+            print(f"  DOWN token: {market.down_token_id[:20]}...")
+            print(f"  neg_risk  : {market.neg_risk}")
+            return market.up_token_id, market.neg_risk
     except Exception as e:
-        print(f"  [live token] CLOB fetch failed: {e}")
+        print(f"  [live token] market_discovery failed: {e}")
 
-    # ── 2. Gamma API fallback ─────────────────────────────────────────
+    # ── 2. Manual Gamma slug fallback ────────────────────────────────
     try:
-        resp = httpx.get(
-            "https://gamma-api.polymarket.com/markets",
-            params={"tag": "Crypto", "active": "true", "closed": "false", "limit": "50"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        for m in resp.json():
-            slug = (m.get("slug") or m.get("question") or "").lower()
-            if "btc" in slug and ("above" in slug or "price" in slug):
-                tokens = m.get("clobTokenIds") or []
-                if tokens:
-                    print(f"  [live token/Gamma] {m.get('question','')[:60]}")
-                    return str(tokens[0])
+        interval  = 300
+        window_ts = int(time.time())
+        window_ts = window_ts - (window_ts % interval)
+        for offset in (0, 1, -1):
+            slug = f"btc-updown-5m-{window_ts + offset * interval}"
+            resp = httpx.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"slug": slug}, timeout=8,
+            )
+            data = resp.json()
+            if not data:
+                continue
+            top = data[0] if isinstance(data, list) else data
+            clob_ids = top.get("clobTokenIds") or []
+            if isinstance(clob_ids, str):
+                clob_ids = _json.loads(clob_ids)
+            neg_risk = bool(top.get("negRisk") or top.get("neg_risk") or True)
+            if clob_ids:
+                print(f"  [live token/Gamma slug] {slug}")
+                return str(clob_ids[0]), neg_risk
     except Exception as e:
-        print(f"  [live token] Gamma fetch failed: {e}")
+        print(f"  [live token] Gamma slug fallback failed: {e}")
 
     print(f"  [live token] using hardcoded fallback — orderbook may be closed")
-    return _FALLBACK_TOKEN
+    return _FALLBACK_TOKEN, False
 
-TOKEN_ID = _fetch_live_btc_token()
+TOKEN_ID, _MARKET_NEG_RISK = _fetch_live_btc_token()
 PRICE    = 0.50
 SIZE     = 5.0
 SIDE     = "BUY"
@@ -227,17 +222,18 @@ print("── Bagian 3: intercept POST body (tidak dikirim) ──────�
 if not all([AKEY, ASEC, APASS]):
     print("  API creds tidak lengkap — skip.")
 else:
-    import httpx
-    _orig_post = httpx.post
-    captured   = {}
-
-    def _fake_post(url, **kwargs):
-        captured["url"]  = url
-        captured["body"] = kwargs.get("data") or kwargs.get("content") or ""
-        raise RuntimeError("__INTERCEPTED__")
-
-    httpx.post = _fake_post
     try:
+        import py_clob_client.http_helpers.helpers as _http_helpers
+        _orig_http_post = _http_helpers.post
+        _captured_body  = {}
+
+        def _intercept_post(url, headers=None, data=None, **kwargs):
+            _captured_body["url"]  = url
+            _captured_body["data"] = data or ""
+            raise RuntimeError("__INTERCEPTED__")
+
+        _http_helpers.post = _intercept_post
+
         creds = ApiCreds(api_key=AKEY, api_secret=ASEC, api_passphrase=APASS)
         client_l2 = ClobClient(
             host="https://clob.polymarket.com",
@@ -247,9 +243,9 @@ else:
             signature_type=SIG_T,
             funder=FUND,
         )
-        # Use the OFFICIAL library flow (includes __resolve_fee_rate)
+        # Use _MARKET_NEG_RISK from the bot's own market discovery
         tick_size = client_l2.get_tick_size(TOKEN_ID)
-        neg_risk  = client_l2.get_neg_risk(TOKEN_ID)
+        neg_risk  = _MARKET_NEG_RISK   # use Gamma-derived neg_risk, not CLOB API
         order_args = OrderArgs(
             token_id=TOKEN_ID,
             price=PRICE,
@@ -260,9 +256,10 @@ else:
         options = CreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk)
         signed2 = client_l2.builder.create_order(order_args, options)
         client_l2.post_order(signed2, OrderType.GTC)
+
     except RuntimeError as e:
         if "__INTERCEPTED__" in str(e):
-            body_str = captured.get("body", "")
+            body_str = _captured_body.get("data", "")
             try:
                 body_obj  = json.loads(body_str)
                 ord_body  = body_obj.get("order", {})
@@ -278,14 +275,16 @@ else:
                 print(f"  neg_risk used : {neg_risk}")
                 sig_b = ord_body.get("signature", "")
                 print(f"  sig[:22]      : {sig_b[:22]}...")
+                print()
+                print(f"  ✓ POST body captured — order NOT sent to server")
             except Exception:
-                print(f"  Raw body: {body_str[:300]}")
+                print(f"  Raw body: {body_str[:400]}")
         else:
             print(f"  ERROR: {e}")
     except Exception as e:
-        print(f"  ERROR (non-intercept): {e}")
+        print(f"  ERROR: {e}")
     finally:
-        httpx.post = _orig_post
+        _http_helpers.post = _orig_http_post
 
 # ── Bagian 4: API secret encoding / padding check ────────────────────────
 print()
